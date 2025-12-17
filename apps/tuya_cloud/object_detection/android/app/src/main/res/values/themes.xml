@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.PersonDetector" parent="Theme.AppCompat.Light.DarkActionBar">
+        <item name="colorPrimary">#0ea5e9</item>
+        <item name="colorPrimaryDark">#0284c7</item>
+        <item name="colorAccent">#06b6d4</item>
+    </style>
+</resources>
