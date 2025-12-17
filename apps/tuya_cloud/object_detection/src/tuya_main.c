@@ -58,6 +58,12 @@ static bool g_detection_active = false;
 /* Audio player initialized flag */
 static bool g_audio_initialized = false;
 
+/* Current volume level (0-100) */
+static uint8_t g_current_volume = DEFAULT_VOLUME;
+
+/* Speaker enable GPIO (T5AI-CORE uses GPIO39) */
+#define SPEAKER_EN_GPIO TUYA_GPIO_NUM_39
+
 #ifndef PROJECT_VERSION
 #define PROJECT_VERSION "1.0.0"
 #endif
@@ -75,12 +81,34 @@ tuya_iot_client_t client;
 tuya_iot_license_t license;
 
 /**
+ * @brief Update speaker GPIO based on current volume
+ * When volume is 0, disable speaker amplifier (mute)
+ * When volume > 0, enable speaker amplifier
+ */
+static void update_speaker_gpio(uint8_t volume)
+{
+    TUYA_GPIO_LEVEL_E level = (volume > 0) ? TUYA_GPIO_LEVEL_HIGH : TUYA_GPIO_LEVEL_LOW;
+    OPERATE_RET rt = tkl_gpio_write(SPEAKER_EN_GPIO, level);
+    if (rt != OPRT_OK) {
+        PR_ERR("Failed to update speaker GPIO: %d", rt);
+    } else {
+        PR_DEBUG("Speaker amplifier %s (volume=%d)", (volume > 0) ? "ENABLED" : "DISABLED/MUTED", volume);
+    }
+}
+
+/**
  * @brief Play the alert audio when detection is triggered
  */
 static void play_detection_alert(void)
 {
     if (!g_audio_initialized) {
         PR_WARN("Audio not initialized, cannot play alert");
+        return;
+    }
+    
+    /* Check if volume is 0 (muted) - don't play audio */
+    if (g_current_volume == 0) {
+        PR_INFO("Volume is 0 (muted), not playing audio");
         return;
     }
     
@@ -230,19 +258,28 @@ void user_event_handler_on(tuya_iot_client_t *client, tuya_event_msg_t *event)
                 PR_DEBUG("bool value:%d", dp->value.dp_bool);
                 /* Check if this is the detection switch DP (usually DP ID 1) */
                 if (dp->id == SWITCH_DP_ID) {
-                    g_detection_active = dp->value.dp_bool;
+                    BOOL_T new_state = dp->value.dp_bool;
+                    BOOL_T state_changed = (new_state != g_detection_active);
+                    
+                    /* Update global state */
+                    g_detection_active = new_state;
                     
                     /* Report the new state back to the cloud/app immediately */
                     tuya_iot_dp_obj_report(client, dpobj->devid, dp, 1, 0);
 
-                    if (g_detection_active) {
-                        /* Detection ON - Play the alert audio */
-                        PR_INFO("Object Detection: ACTIVATED - Playing alert");
-                        play_detection_alert();
+                    /* Only trigger actions if the state actually changed */
+                    if (state_changed) {
+                        if (g_detection_active) {
+                            /* Detection ON - Play the alert audio */
+                            PR_INFO("Object Detection: ACTIVATED - Playing alert");
+                            play_detection_alert();
+                        } else {
+                            /* Detection OFF - Stop any playing audio */
+                            PR_INFO("Object Detection: DEACTIVATED - Stopping audio");
+                            stop_detection_alert();
+                        }
                     } else {
-                        /* Detection OFF - Stop any playing audio */
-                        PR_INFO("Object Detection: DEACTIVATED - Stopping audio");
-                        stop_detection_alert();
+                        PR_DEBUG("Switch state unchanged (%d), ignoring duplicate command", new_state);
                     }
                 }
                 break;
@@ -253,7 +290,16 @@ void user_event_handler_on(tuya_iot_client_t *client, tuya_event_msg_t *event)
                 if (dp->id == VOLUME_DP_ID) {
                     uint8_t volume = (uint8_t)dp->value.dp_value;
                     PR_INFO("Setting volume to: %d", volume);
+                    
+                    /* Update stored volume */
+                    g_current_volume = volume;
+                    
+                    /* Set DAC gain */
                     ai_audio_set_volume(volume);
+                    
+                    /* Control speaker amplifier GPIO based on volume */
+                    update_speaker_gpio(volume);
+                    
                     /* Report the new volume back to the cloud/app */
                     tuya_iot_dp_obj_report(client, dpobj->devid, dp, 1, 0);
                 }
@@ -400,6 +446,7 @@ void user_main(void)
                 
                 /* Set default volume */
                 PR_INFO("Setting default volume to %d", DEFAULT_VOLUME);
+                g_current_volume = DEFAULT_VOLUME;
                 rt = ai_audio_set_volume(DEFAULT_VOLUME);
                 if (rt != OPRT_OK) {
                     PR_ERR("Failed to set volume: %d", rt);
