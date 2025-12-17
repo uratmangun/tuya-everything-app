@@ -2,6 +2,9 @@ __pycache__
 .vscode
 .tags
 .env.json
+.env
+.env.local
+.build_credentials.config
 
 CMakeCache.txt
 /CMakeFiles

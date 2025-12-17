@@ -34,10 +34,21 @@
 #endif
 
 #include "reset_netcfg.h"
+#include "tkl_gpio.h"
 
 #if defined(ENABLE_QRCODE) && (ENABLE_QRCODE == 1)
 #include "qrencode_print.h"
 #endif
+
+/* LED GPIO configuration for T5AI-CORE board */
+#define SWITCH_LED_PIN       TUYA_GPIO_NUM_9
+#define SWITCH_LED_ACTIVE_LV TUYA_GPIO_LEVEL_HIGH
+
+/* Switch DP ID - typically DP 1 for switch products */
+#define SWITCH_DP_ID         1
+
+/* Current switch state */
+static bool g_switch_state = false;
 
 #ifndef PROJECT_VERSION
 #define PROJECT_VERSION "1.0.0"
@@ -142,6 +153,17 @@ void user_event_handler_on(tuya_iot_client_t *client, tuya_event_msg_t *event)
             switch (dp->type) {
             case PROP_BOOL: {
                 PR_DEBUG("bool value:%d", dp->value.dp_bool);
+                /* Check if this is the switch DP (usually DP ID 1) */
+                if (dp->id == SWITCH_DP_ID) {
+                    g_switch_state = dp->value.dp_bool;
+                    /* Control the LED based on switch state */
+                    TUYA_GPIO_LEVEL_E level = g_switch_state ? SWITCH_LED_ACTIVE_LV : 
+                                              (SWITCH_LED_ACTIVE_LV == TUYA_GPIO_LEVEL_HIGH ? 
+                                               TUYA_GPIO_LEVEL_LOW : TUYA_GPIO_LEVEL_HIGH);
+                    tkl_gpio_write(SWITCH_LED_PIN, level);
+                    PR_INFO("Switch %s - LED %s", g_switch_state ? "ON" : "OFF", 
+                            g_switch_state ? "ON" : "OFF");
+                }
                 break;
             }
             case PROP_VALUE: {
@@ -235,6 +257,15 @@ void user_main(void)
     });
     tal_sw_timer_init();
     tal_workq_init();
+
+    /* Initialize LED GPIO for switch control */
+    TUYA_GPIO_BASE_CFG_T led_cfg = {
+        .mode = TUYA_GPIO_PUSH_PULL,
+        .direct = TUYA_GPIO_OUTPUT,
+        .level = (SWITCH_LED_ACTIVE_LV == TUYA_GPIO_LEVEL_HIGH) ? TUYA_GPIO_LEVEL_LOW : TUYA_GPIO_LEVEL_HIGH,
+    };
+    tkl_gpio_init(SWITCH_LED_PIN, &led_cfg);
+    PR_INFO("LED GPIO initialized on pin %d", SWITCH_LED_PIN);
 
 #if !defined(PLATFORM_UBUNTU) || (PLATFORM_UBUNTU == 0)
     tal_cli_init();

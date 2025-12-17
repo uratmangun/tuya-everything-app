@@ -25,9 +25,28 @@
  *
  */
 // clang-format off
-#define TUYA_PRODUCT_ID      "qhivvyqawogv04e4"                        // Please change your product id
-#define TUYA_OPENSDK_UUID      "uuidxxxxxxxxxxxxxxxx"                    // Please change the correct uuid
-#define TUYA_OPENSDK_AUTHKEY   "keyxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"        // Please change the correct authkey
+
+/**
+ * Tuya credentials can be provided in 3 ways (in order of priority):
+ * 1. CMake build flags: -DTUYA_PRODUCT_ID="xxx" -DTUYA_OPENSDK_UUID="xxx" -DTUYA_OPENSDK_AUTHKEY="xxx"
+ * 2. Environment variables (via build script): TUYA_PRODUCT_ID, TUYA_OPENSDK_UUID, TUYA_OPENSDK_AUTHKEY  
+ * 3. Hardcoded values below (NOT recommended for production)
+ */
+
+// Product ID - Check if defined via build system, otherwise use fallback
+#ifndef TUYA_PRODUCT_ID
+#define TUYA_PRODUCT_ID      "REPLACE_WITH_YOUR_PRODUCT_ID"
+#endif
+
+// UUID - Check if defined via build system, otherwise use fallback
+#ifndef TUYA_OPENSDK_UUID
+#define TUYA_OPENSDK_UUID    "REPLACE_WITH_YOUR_UUID"
+#endif
+
+// AuthKey - Check if defined via build system, otherwise use fallback
+#ifndef TUYA_OPENSDK_AUTHKEY
+#define TUYA_OPENSDK_AUTHKEY "REPLACE_WITH_YOUR_AUTHKEY"
+#endif
 
 /**
  * @brief PINCODE for AP provisioning
