@@ -1,13 +1,12 @@
 /**
  * @file tuya_main.c
- * @brief tuya_main module is used to manage the Tuya device application.
+ * @brief Object Detection module with audio alert functionality.
  *
- * This file provides the implementation of the tuya_main module,
- * which is responsible for managing the Tuya device application.
+ * This application plays audio alerts when the detection switch is toggled.
+ * When ON: Plays an alert sound
+ * When OFF: Stops any playing audio
  *
  * @copyright Copyright (c) 2021-2025 Tuya Inc. All Rights Reserved.
- *
- * 2025-07-11   yangjie     Add cellular network support.
  */
 
 #include "cJSON.h"
@@ -40,15 +39,24 @@
 #include "qrencode_print.h"
 #endif
 
-/* LED GPIO configuration for T5AI-CORE board */
-#define SWITCH_LED_PIN       TUYA_GPIO_NUM_9
-#define SWITCH_LED_ACTIVE_LV TUYA_GPIO_LEVEL_HIGH
+/* Audio player includes */
+#include "ai_audio_player.h"
+#include "ai_audio.h"
+#include "alert_audio_data.h"
+#include "tdl_audio_manage.h"
 
 /* Switch DP ID - typically DP 1 for switch products */
 #define SWITCH_DP_ID         1
+/* Volume DP ID - DP 3 for volume control */
+#define VOLUME_DP_ID         3
+/* Default volume level (0-100) */
+#define DEFAULT_VOLUME       70
 
-/* Current switch state */
-static bool g_switch_state = false;
+/* Current detection state */
+static bool g_detection_active = false;
+
+/* Audio player initialized flag */
+static bool g_audio_initialized = false;
 
 #ifndef PROJECT_VERSION
 #define PROJECT_VERSION "1.0.0"
@@ -57,11 +65,69 @@ static bool g_switch_state = false;
 /* for cli command register */
 extern void tuya_app_cli_init(void);
 
+/* Board hardware registration (audio driver, etc.) */
+extern OPERATE_RET board_register_hardware(void);
+
 /* Tuya device handle */
 tuya_iot_client_t client;
 
 /* Tuya license information (uuid authkey) */
 tuya_iot_license_t license;
+
+/**
+ * @brief Play the alert audio when detection is triggered
+ */
+static void play_detection_alert(void)
+{
+    if (!g_audio_initialized) {
+        PR_WARN("Audio not initialized, cannot play alert");
+        return;
+    }
+    
+    /* Stop any currently playing audio first */
+    if (ai_audio_player_is_playing()) {
+        PR_DEBUG("Stopping previous audio before playing new alert");
+        ai_audio_player_stop();
+    }
+    
+    PR_INFO("Playing detection alert audio (size=%d bytes)...", sizeof(alert_audio_data));
+    
+    /* Start the audio player with an ID */
+    OPERATE_RET rt = ai_audio_player_start("detection_alert");
+    if (rt != OPRT_OK) {
+        PR_ERR("Failed to start audio player: %d", rt);
+        return;
+    }
+    
+    PR_DEBUG("Audio player started, writing data...");
+    
+    /* Write the prebuild audio data to the player */
+    /* is_eof=1 means this is the complete audio file */
+    rt = ai_audio_player_data_write("detection_alert", 
+                                     (uint8_t *)alert_audio_data, 
+                                     sizeof(alert_audio_data), 
+                                     1);
+    if (rt != OPRT_OK) {
+        PR_ERR("Failed to write audio data: %d", rt);
+    } else {
+        PR_INFO("Audio data written successfully, playback should start");
+    }
+}
+
+/**
+ * @brief Stop any playing audio
+ */
+static void stop_detection_alert(void)
+{
+    if (!g_audio_initialized) {
+        return;
+    }
+    
+    if (ai_audio_player_is_playing()) {
+        PR_INFO("Stopping detection alert audio...");
+        ai_audio_player_stop();
+    }
+}
 
 /**
  * @brief user defined log output api, in this demo, it will use uart0 as log-tx
@@ -126,9 +192,11 @@ void user_event_handler_on(tuya_iot_client_t *client, tuya_event_msg_t *event)
 #endif
     } break;
 
+
     /* MQTT with tuya cloud is connected, device online */
     case TUYA_EVENT_MQTT_CONNECTED:
         PR_INFO("Device MQTT Connected!");
+        /* TODO: Report initial state after connection stabilizes */
         break;
 
     /* RECV upgrade request */
@@ -160,21 +228,35 @@ void user_event_handler_on(tuya_iot_client_t *client, tuya_event_msg_t *event)
             switch (dp->type) {
             case PROP_BOOL: {
                 PR_DEBUG("bool value:%d", dp->value.dp_bool);
-                /* Check if this is the switch DP (usually DP ID 1) */
+                /* Check if this is the detection switch DP (usually DP ID 1) */
                 if (dp->id == SWITCH_DP_ID) {
-                    g_switch_state = dp->value.dp_bool;
-                    /* Control the LED based on switch state */
-                    TUYA_GPIO_LEVEL_E level = g_switch_state ? SWITCH_LED_ACTIVE_LV : 
-                                              (SWITCH_LED_ACTIVE_LV == TUYA_GPIO_LEVEL_HIGH ? 
-                                               TUYA_GPIO_LEVEL_LOW : TUYA_GPIO_LEVEL_HIGH);
-                    tkl_gpio_write(SWITCH_LED_PIN, level);
-                    PR_INFO("Switch %s - LED %s", g_switch_state ? "ON" : "OFF", 
-                            g_switch_state ? "ON" : "OFF");
+                    g_detection_active = dp->value.dp_bool;
+                    
+                    /* Report the new state back to the cloud/app immediately */
+                    tuya_iot_dp_obj_report(client, dpobj->devid, dp, 1, 0);
+
+                    if (g_detection_active) {
+                        /* Detection ON - Play the alert audio */
+                        PR_INFO("Object Detection: ACTIVATED - Playing alert");
+                        play_detection_alert();
+                    } else {
+                        /* Detection OFF - Stop any playing audio */
+                        PR_INFO("Object Detection: DEACTIVATED - Stopping audio");
+                        stop_detection_alert();
+                    }
                 }
                 break;
             }
             case PROP_VALUE: {
                 PR_DEBUG("int value:%d", dp->value.dp_value);
+                /* Check if this is the volume DP */
+                if (dp->id == VOLUME_DP_ID) {
+                    uint8_t volume = (uint8_t)dp->value.dp_value;
+                    PR_INFO("Setting volume to: %d", volume);
+                    ai_audio_set_volume(volume);
+                    /* Report the new volume back to the cloud/app */
+                    tuya_iot_dp_obj_report(client, dpobj->devid, dp, 1, 0);
+                }
                 break;
             }
             case PROP_STR: {
@@ -195,9 +277,7 @@ void user_event_handler_on(tuya_iot_client_t *client, tuya_event_msg_t *event)
             }
             } // end of switch
         }
-
-        tuya_iot_dp_obj_report(client, dpobj->devid, dpobj->dps, dpobj->dpscnt, 0);
-
+        
     } break;
 
     /* RECV RAW DP */
@@ -265,14 +345,70 @@ void user_main(void)
     tal_sw_timer_init();
     tal_workq_init();
 
-    /* Initialize LED GPIO for switch control */
-    TUYA_GPIO_BASE_CFG_T led_cfg = {
-        .mode = TUYA_GPIO_PUSH_PULL,
-        .direct = TUYA_GPIO_OUTPUT,
-        .level = (SWITCH_LED_ACTIVE_LV == TUYA_GPIO_LEVEL_HIGH) ? TUYA_GPIO_LEVEL_LOW : TUYA_GPIO_LEVEL_HIGH,
-    };
-    tkl_gpio_init(SWITCH_LED_PIN, &led_cfg);
-    PR_INFO("LED GPIO initialized on pin %d", SWITCH_LED_PIN);
+    /* Register board hardware (audio driver, button, LED) */
+    PR_INFO("Registering board hardware...");
+    rt = board_register_hardware();
+    if (rt != OPRT_OK) {
+        PR_ERR("Failed to register board hardware: %d", rt);
+    } else {
+        PR_INFO("Board hardware registered successfully");
+    }
+
+    /* Initialize the audio player */
+    PR_INFO("Initializing audio player...");
+    rt = ai_audio_player_init();
+    if (rt != OPRT_OK) {
+        PR_ERR("Failed to initialize audio player: %d", rt);
+        g_audio_initialized = false;
+    } else {
+        PR_INFO("Audio player initialized successfully");
+        
+        /* Open the audio device to enable playback */
+        TDL_AUDIO_HANDLE_T audio_hdl = NULL;
+        rt = tdl_audio_find(AUDIO_CODEC_NAME, &audio_hdl);
+        if (rt != OPRT_OK) {
+            PR_ERR("Failed to find audio codec: %d", rt);
+            g_audio_initialized = false;
+        } else {
+            rt = tdl_audio_open(audio_hdl, NULL);
+            if (rt != OPRT_OK) {
+                PR_ERR("Failed to open audio device: %d", rt);
+                g_audio_initialized = false;
+            } else {
+                PR_INFO("Audio device opened successfully");
+                g_audio_initialized = true;
+                
+                /* Enable speaker amplifier GPIO (GPIO39 on T5AI-CORE) */
+                /* Speaker is active when GPIO is HIGH (polarity=LOW means LOW=mute) */
+                PR_INFO("Enabling speaker amplifier (GPIO39)...");
+                TUYA_GPIO_BASE_CFG_T spk_gpio_cfg = {
+                    .direct = TUYA_GPIO_OUTPUT,
+                    .mode = TUYA_GPIO_PUSH_PULL,
+                    .level = TUYA_GPIO_LEVEL_HIGH  /* HIGH = speaker enabled */
+                };
+                rt = tkl_gpio_init(TUYA_GPIO_NUM_39, &spk_gpio_cfg);
+                if (rt != OPRT_OK) {
+                    PR_ERR("Failed to init speaker GPIO: %d", rt);
+                } else {
+                    rt = tkl_gpio_write(TUYA_GPIO_NUM_39, TUYA_GPIO_LEVEL_HIGH);
+                    if (rt != OPRT_OK) {
+                        PR_ERR("Failed to enable speaker GPIO: %d", rt);
+                    } else {
+                        PR_INFO("Speaker amplifier enabled (GPIO39=HIGH)");
+                    }
+                }
+                
+                /* Set default volume */
+                PR_INFO("Setting default volume to %d", DEFAULT_VOLUME);
+                rt = ai_audio_set_volume(DEFAULT_VOLUME);
+                if (rt != OPRT_OK) {
+                    PR_ERR("Failed to set volume: %d", rt);
+                } else {
+                    PR_INFO("Volume set successfully");
+                }
+            }
+        }
+    }
 
 #if !defined(PLATFORM_UBUNTU) || (PLATFORM_UBUNTU == 0)
     tal_cli_init();

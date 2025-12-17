@@ -71,6 +71,7 @@ typedef struct {
     uint8_t *mp3_pcm; // mp3 decode to pcm buffer
 
     uint8_t is_first_play;
+    uint8_t finish_delay_count; // delay counter for audio output buffer drain
 } APP_PLAYER_T;
 
 /***********************************************************
@@ -215,6 +216,7 @@ static void __ai_audio_player_task(void *arg)
                 tal_sw_timer_stop(ctx->tm_id);
             }
             ctx->is_eof = 0;
+            ctx->finish_delay_count = 0;
         } break;
         case AI_AUDIO_PLAYER_STAT_START: {
             rt = __ai_audio_player_mp3_start();
@@ -224,6 +226,7 @@ static void __ai_audio_player_task(void *arg)
                 ctx->stat = AI_AUDIO_PLAYER_STAT_PLAY;
             }
             ctx->is_first_play = 1;
+            ctx->finish_delay_count = 0;
             start_time = tal_system_get_millisecond();
         } break;
         case AI_AUDIO_PLAYER_STAT_PLAY: {
@@ -251,6 +254,13 @@ static void __ai_audio_player_task(void *arg)
             uint32_t rb_used_len = tuya_ring_buff_used_size_get(ctx->rb_hdl);
             tal_mutex_unlock(ctx->spk_rb_mutex);
             if (rb_used_len == 0 && 0 == ctx->mp3_raw_used_len && ctx->is_eof) {
+                /* Wait for audio output buffer to drain before finishing */
+                /* This delay allows the decoded PCM data to be played out */
+                if (ctx->finish_delay_count < 100) { /* ~500ms delay (100 * 5ms) */
+                    ctx->finish_delay_count++;
+                    break;
+                }
+                ctx->finish_delay_count = 0;
                 PR_DEBUG("app player end");
                 ctx->stat = AI_AUDIO_PLAYER_STAT_FINISH;
             }
