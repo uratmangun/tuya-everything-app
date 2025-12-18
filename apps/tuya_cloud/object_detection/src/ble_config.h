@@ -52,6 +52,18 @@ OPERATE_RET ble_config_load_tcp_settings(char *host, uint16_t *port, char *token
  */
 OPERATE_RET ble_config_save_tcp_settings(const char *host, uint16_t port, const char *token);
 
+/**
+ * @brief Connect to WiFi network directly
+ * 
+ * This function connects to the specified WiFi network using tkl_wifi_station_connect.
+ * It bypasses the Tuya pairing flow and connects directly.
+ * 
+ * @param[in] ssid WiFi network SSID
+ * @param[in] password WiFi password (can be NULL for open networks)
+ * @return OPRT_OK if connection initiated successfully
+ */
+OPERATE_RET ble_config_wifi_connect(const char *ssid, const char *password);
+
 #ifdef __cplusplus
 }
 #endif

@@ -242,6 +242,32 @@ static void config_show(int argc, char *argv[])
 }
 
 /**
+ * @brief Connect to WiFi directly (bypasses Tuya pairing)
+ *
+ * @param argc
+ * @param argv
+ */
+static void wifi_connect(int argc, char *argv[])
+{
+    if (argc < 2) {
+        PR_INFO("usage: wifi_connect <ssid> [password]");
+        PR_INFO("  Connects directly to the specified WiFi network.");
+        PR_INFO("  This bypasses the Tuya Smart Life app pairing flow.");
+        return;
+    }
+    
+    const char *ssid = argv[1];
+    const char *password = argc >= 3 ? argv[2] : "";
+    
+    OPERATE_RET rt = ble_config_wifi_connect(ssid, password);
+    if (rt == OPRT_OK) {
+        PR_NOTICE("WiFi connection initiated. Check for IP assignment.");
+    } else {
+        PR_ERR("WiFi connection failed: %d", rt);
+    }
+}
+
+/**
  * @brief cli cmd list
  *
  */
@@ -256,6 +282,7 @@ static cli_cmd_t s_cli_cmd[] = {
     {.name = "netmgr", .func = netmgr_cmd, .help = "netmgr cmd"},
     {.name = "audio", .func = audio_test, .help = "audio test <play|stop|vol>"},
     {.name = "config", .func = config_show, .help = "show TCP config & BLE setup info"},
+    {.name = "wifi_connect", .func = wifi_connect, .help = "wifi_connect <ssid> [password]"},
 };
 
 /**

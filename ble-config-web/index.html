@@ -451,6 +451,18 @@
                     style="margin-top: 12px;">
                     <span>❌</span> Disconnect
                 </button>
+
+                <div
+                    style="margin-top: 16px; padding: 12px; background: rgba(245, 158, 11, 0.1); border-radius: 10px; font-size: 13px; color: var(--text-secondary);">
+                    <strong>⚠️ Device not appearing?</strong><br>
+                    • Device advertises as <strong>"TYBLE"</strong> or <strong>"TY..."</strong><br>
+                    • BLE is disabled when device is connected to WiFi/IoT cloud<br>
+                    • Run <code
+                        style="background: var(--bg-secondary); padding: 2px 6px; border-radius: 4px;">reset</code> in
+                    CLI to enter pairing mode<br>
+                    • Or use CLI command: <code
+                        style="background: var(--bg-secondary); padding: 2px 6px; border-radius: 4px;">wifi_connect SSID password</code>
+                </div>
             </div>
 
             <!-- Configuration Tabs (only visible when connected) -->
@@ -627,19 +639,22 @@
         async function connectDevice() {
             const btn = document.getElementById('connectBtn');
             btn.disabled = true;
-            btn.innerHTML = '<div class="spinner"></div> Connecting...';
+            btn.innerHTML = '<div class="spinner"></div> Scanning...';
 
             updateConnectionStatus('connecting');
 
             try {
-                // Request device
+                // Request device - accepts any Tuya device
+                // Note: Device must be advertising! 
+                // Tuya devices stop advertising when connected to IoT cloud.
                 device = await navigator.bluetooth.requestDevice({
                     filters: [
-                        { namePrefix: DEVICE_NAME_PREFIX },
-                        { namePrefix: 'TY' },
-                        { namePrefix: 'tuya' }
+                        { namePrefix: 'TY' },  // Tuya BLE name is "TYBLE"
+                        { namePrefix: 'tuya' },
+                        { namePrefix: 'T5' }
                     ],
-                    optionalServices: [TUYA_SERVICE_UUID, CONFIG_SERVICE_UUID]
+                    optionalServices: [TUYA_SERVICE_UUID, CONFIG_SERVICE_UUID],
+                    // If no devices found with filters, try: acceptAllDevices: true
                 });
 
                 console.log('Device selected:', device.name);
@@ -676,6 +691,7 @@
                         console.log('Config service connected');
                     } catch (e2) {
                         console.warn('No config service found, using device info only');
+                        showToast('⚠️', 'Connected but no config service. Use CLI instead.', 'error');
                     }
                 }
 
@@ -693,7 +709,13 @@
             } catch (error) {
                 console.error('Connection error:', error);
                 updateConnectionStatus('disconnected');
-                showToast('❌', 'Connection failed: ' + error.message, 'error');
+
+                // Provide helpful error messages
+                if (error.name === 'NotFoundError') {
+                    showToast('⚠️', 'No devices found. Make sure device is in pairing mode (not connected to WiFi/IoT).', 'error');
+                } else {
+                    showToast('❌', 'Connection failed: ' + error.message, 'error');
+                }
             }
 
             btn.disabled = false;

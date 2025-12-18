@@ -1,10 +1,11 @@
 /**
  * @file ble_config.c
- * @brief BLE Configuration Handler for Web Bluetooth
+ * @brief BLE Configuration Handler for Local Device Configuration
  * 
- * This module provides persistent storage for TCP server settings
- * that can be configured via BLE or the CLI. Settings are stored
- * in flash using KV storage and persist across reboots.
+ * This module provides:
+ * 1. Persistent KV storage for TCP server settings
+ * 2. WiFi direct connection capability
+ * 3. BLE channel handler for receiving config commands
  *
  * Web Bluetooth Page: https://ble-config-web.vercel.app
  *
@@ -13,8 +14,180 @@
 
 #include "ble_config.h"
 #include "tal_api.h"
+#include "cJSON.h"
 #include <string.h>
 #include <stdio.h>
+
+/* WiFi direct connect API */
+#include "tkl_wifi.h"
+
+/* BLE channel for receiving config commands */
+#include "ble_channel.h"
+#include "ble_mgr.h"
+#include "ble_protocol.h"
+
+/***********************************************************
+ * WiFi Direct Connection
+ ***********************************************************/
+
+/**
+ * @brief Save WiFi credentials to KV storage
+ */
+static OPERATE_RET save_wifi_credentials(const char *ssid, const char *password)
+{
+    OPERATE_RET rt;
+    
+    rt = tal_kv_set("wifi_ssid", (const uint8_t *)ssid, strlen(ssid) + 1);
+    if (rt != OPRT_OK) return rt;
+    
+    rt = tal_kv_set("wifi_passwd", (const uint8_t *)password, strlen(password) + 1);
+    return rt;
+}
+
+/**
+ * @brief Connect to WiFi directly using tkl_wifi_station_connect
+ * 
+ * This bypasses the Tuya cloud pairing and connects directly to the specified
+ * WiFi network. Use this when you need to change WiFi without going through
+ * the Tuya Smart Life app flow.
+ */
+OPERATE_RET ble_config_wifi_connect(const char *ssid, const char *password)
+{
+    if (!ssid || strlen(ssid) == 0) {
+        return OPRT_INVALID_PARM;
+    }
+    
+    PR_NOTICE("============================================");
+    PR_NOTICE("     CONNECTING TO WIFI DIRECTLY");
+    PR_NOTICE("============================================");
+    PR_NOTICE("SSID: %s", ssid);
+    PR_NOTICE("Password length: %d", password ? strlen(password) : 0);
+    
+    /* Save credentials first */
+    save_wifi_credentials(ssid, password ? password : "");
+    
+    /* Connect directly using TKL API */
+    OPERATE_RET rt = tkl_wifi_station_connect((const SCHAR_T *)ssid, (const SCHAR_T *)password);
+    
+    if (rt == OPRT_OK) {
+        PR_NOTICE("WiFi connection initiated successfully!");
+        PR_NOTICE("Device will obtain IP via DHCP...");
+    } else {
+        PR_ERR("WiFi connection failed: %d", rt);
+    }
+    
+    return rt;
+}
+
+/***********************************************************
+ * BLE Configuration Channel Handler
+ * 
+ * This handles commands received via BLE from Web Bluetooth.
+ * Commands are JSON formatted:
+ * - {"cmd":"set_tcp","host":"...","port":5000,"token":"..."}
+ * - {"cmd":"set_wifi","ssid":"...","password":"..."}
+ * - {"cmd":"get_status"}
+ * - {"cmd":"reboot"}
+ ***********************************************************/
+
+/* Channel type for our config handler */
+#define BLE_CHANNEL_CONFIG 0x10
+
+static void ble_config_channel_handler(void *data, void *user_data)
+{
+    if (!data) return;
+    
+    char *json_str = (char *)data;
+    PR_INFO("BLE Config received: %s", json_str);
+    
+    cJSON *root = cJSON_Parse(json_str);
+    if (!root) {
+        PR_ERR("BLE config: invalid JSON");
+        return;
+    }
+    
+    cJSON *cmd = cJSON_GetObjectItem(root, "cmd");
+    if (!cmd || !cJSON_IsString(cmd)) {
+        PR_ERR("BLE config: missing cmd");
+        cJSON_Delete(root);
+        return;
+    }
+    
+    /* Handle set_tcp command */
+    if (strcmp(cmd->valuestring, "set_tcp") == 0) {
+        cJSON *host = cJSON_GetObjectItem(root, "host");
+        cJSON *port = cJSON_GetObjectItem(root, "port");
+        cJSON *token = cJSON_GetObjectItem(root, "token");
+        
+        if (host && cJSON_IsString(host)) {
+            uint16_t port_val = 5000;
+            if (port && cJSON_IsNumber(port)) {
+                port_val = (uint16_t)port->valueint;
+            }
+            
+            const char *token_val = "";
+            if (token && cJSON_IsString(token)) {
+                token_val = token->valuestring;
+            }
+            
+            ble_config_save_tcp_settings(host->valuestring, port_val, token_val);
+            PR_NOTICE("BLE config: TCP settings saved - %s:%d", host->valuestring, port_val);
+            
+            /* Send response via BLE */
+            uint8_t resp[] = {0x00, 0x00, 0x00, BLE_CHANNEL_CONFIG, 0x00}; /* Success */
+            tuya_ble_send(FRM_UPLINK_TRANSPARENT_REQ, 0, resp, sizeof(resp));
+        }
+    }
+    /* Handle set_wifi command */
+    else if (strcmp(cmd->valuestring, "set_wifi") == 0) {
+        cJSON *ssid = cJSON_GetObjectItem(root, "ssid");
+        cJSON *password = cJSON_GetObjectItem(root, "password");
+        
+        if (ssid && cJSON_IsString(ssid)) {
+            const char *pw = "";
+            if (password && cJSON_IsString(password)) {
+                pw = password->valuestring;
+            }
+            
+            OPERATE_RET rt = ble_config_wifi_connect(ssid->valuestring, pw);
+            
+            /* Send response */
+            uint8_t resp[] = {0x00, 0x00, 0x00, BLE_CHANNEL_CONFIG, (uint8_t)rt};
+            tuya_ble_send(FRM_UPLINK_TRANSPARENT_REQ, 0, resp, sizeof(resp));
+        }
+    }
+    /* Handle get_status command */
+    else if (strcmp(cmd->valuestring, "get_status") == 0) {
+        int heap = tal_system_get_free_heap_size();
+        
+        /* Build status JSON response */
+        cJSON *status = cJSON_CreateObject();
+        cJSON_AddStringToObject(status, "type", "status");
+        cJSON_AddNumberToObject(status, "heap", heap);
+        
+        char *status_str = cJSON_PrintUnformatted(status);
+        if (status_str) {
+            PR_NOTICE("BLE config: Status - %s", status_str);
+            /* Would send via BLE notify here */
+            tal_free(status_str);
+        }
+        cJSON_Delete(status);
+    }
+    /* Handle reboot command */
+    else if (strcmp(cmd->valuestring, "reboot") == 0) {
+        PR_NOTICE("BLE config: Reboot requested");
+        
+        /* Send acknowledgment first */
+        uint8_t resp[] = {0x00, 0x00, 0x00, BLE_CHANNEL_CONFIG, 0x00};
+        tuya_ble_send(FRM_UPLINK_TRANSPARENT_REQ, 0, resp, sizeof(resp));
+        
+        /* Wait a bit then reboot */
+        tal_system_sleep(500);
+        tal_system_reset();
+    }
+    
+    cJSON_Delete(root);
+}
 
 /***********************************************************
  * KV Storage Functions
@@ -115,20 +288,21 @@ OPERATE_RET ble_config_init(void)
     PR_NOTICE("============================================");
     PR_NOTICE("To configure this device:");
     PR_NOTICE("1. Open https://ble-config-web.vercel.app");
-    PR_NOTICE("2. Click 'Connect to T5AI'");
+    PR_NOTICE("2. Connect via Bluetooth");
     PR_NOTICE("3. Configure WiFi and TCP settings");
     PR_NOTICE("============================================");
     
-    /* Note: Full BLE GATT integration with Web Bluetooth requires
-     * additional platform-specific BLE service setup. The Web Bluetooth
-     * page is ready - the device will appear as "T5AI" or "TY" in 
-     * the Bluetooth device picker.
-     * 
-     * TCP settings can also be configured via the CLI:
-     *   config     - Show current settings
-     *   
-     * Or by editing .env and rebuilding.
+    /* Register BLE channel for config commands 
+     * This uses the Tuya BLE channel infrastructure to receive
+     * transparent data from BLE connections.
      */
+    int rt = ble_channel_add(BLE_CHANNEL_CONFIG, ble_config_channel_handler, NULL);
+    if (rt != OPRT_OK) {
+        PR_WARN("BLE config channel registration: %d (BLE may not be ready yet)", rt);
+        /* Not fatal - the channel will be available once BLE is fully initialized */
+    } else {
+        PR_INFO("BLE config channel registered successfully");
+    }
     
     return OPRT_OK;
 }
