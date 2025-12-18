@@ -29,3 +29,8 @@ dist
 /dist
 *monitor.log
 what/
+
+# Explainer video
+explainer-video/node_modules/
+explainer-video/out/
+explainer-video/.cache/
