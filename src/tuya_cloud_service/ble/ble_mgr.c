@@ -401,12 +401,15 @@ static void ble_mointor_timer_cb(TIMER_ID timer_id, void *arg)
         if (s_iot_conn_stat) {
             return;
         }
-        if (ble->is_paired) {
-            tal_ble_disconnect(ble->peer_info);
-        } else {
-            tal_ble_advertising_stop();
-        }
-        PR_DEBUG("ble monitor check iot is connected, stop adv!");
+        /* 
+         * MODIFIED FOR DEVELOPMENT: Keep BLE advertising even when IoT connected.
+         * This allows Web Bluetooth configuration at any time.
+         * Power consumption is higher but acceptable for mains-powered devices.
+         * 
+         * Original behavior would call:
+         *   tal_ble_advertising_stop() or tal_ble_disconnect()
+         */
+        PR_DEBUG("ble monitor: IoT connected, keeping BLE advertising active (dev mode)");
         s_iot_conn_stat = true;
     } else {
         if (!s_iot_conn_stat) {
