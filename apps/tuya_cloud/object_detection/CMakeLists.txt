@@ -64,6 +64,23 @@ if(TCP_AUTH_TOKEN)
     target_compile_definitions(${EXAMPLE_LIB} PRIVATE TCP_AUTH_TOKEN="${TCP_AUTH_TOKEN}")
 endif()
 
+# RTSP Tunnel configuration
+if(RTSP_CAMERA_HOST)
+    target_compile_definitions(${EXAMPLE_LIB} PRIVATE RTSP_CAMERA_HOST="${RTSP_CAMERA_HOST}")
+endif()
+if(RTSP_CAMERA_PORT)
+    target_compile_definitions(${EXAMPLE_LIB} PRIVATE RTSP_CAMERA_PORT=${RTSP_CAMERA_PORT})
+endif()
+if(RTSP_VPS_HOST)
+    target_compile_definitions(${EXAMPLE_LIB} PRIVATE RTSP_VPS_HOST="${RTSP_VPS_HOST}")
+endif()
+if(RTSP_VPS_PORT)
+    target_compile_definitions(${EXAMPLE_LIB} PRIVATE RTSP_VPS_PORT=${RTSP_VPS_PORT})
+endif()
+if(RTSP_TUNNEL_ENABLED)
+    target_compile_definitions(${EXAMPLE_LIB} PRIVATE RTSP_TUNNEL_ENABLED=${RTSP_TUNNEL_ENABLED})
+endif()
+
 ########################################
 # Add subdirectory
 ########################################

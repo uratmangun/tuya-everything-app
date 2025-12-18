@@ -627,6 +627,32 @@ void user_main(void)
         PR_ERR("Failed to initialize TCP client");
     }
 
+    /* Initialize RTSP tunnel if enabled */
+    PR_NOTICE("============================================");
+    PR_NOTICE("     RTSP TUNNEL CONFIGURATION");
+    PR_NOTICE("============================================");
+    PR_NOTICE("Camera: %s:%d", RTSP_CAMERA_HOST, RTSP_CAMERA_PORT);
+    PR_NOTICE("VPS:    %s:%d", RTSP_VPS_HOST, RTSP_VPS_PORT);
+    PR_NOTICE("Auto-start: %s", RTSP_TUNNEL_ENABLED ? "YES" : "NO (send 'rtsp start' via web app)");
+    PR_NOTICE("============================================");
+
+#if RTSP_TUNNEL_ENABLED
+    {
+        rtsp_tunnel_config_t cfg = {0};
+        strncpy(cfg.camera_host, RTSP_CAMERA_HOST, sizeof(cfg.camera_host) - 1);
+        cfg.camera_port = RTSP_CAMERA_PORT;
+        strncpy(cfg.vps_host, RTSP_VPS_HOST, sizeof(cfg.vps_host) - 1);
+        cfg.vps_port = RTSP_VPS_PORT;
+        
+        if (rtsp_tunnel_init(&cfg, NULL) == OPRT_OK && rtsp_tunnel_start() == OPRT_OK) {
+            g_rtsp_tunnel_active = true;
+            PR_NOTICE("RTSP tunnel started automatically");
+        } else {
+            PR_ERR("Failed to auto-start RTSP tunnel");
+        }
+    }
+#endif
+
     for (;;) {
         /* Loop to receive packets, and handles client keepalive */
         tuya_iot_yield(&client);

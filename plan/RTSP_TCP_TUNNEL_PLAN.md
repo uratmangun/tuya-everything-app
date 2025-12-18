@@ -1,309 +1,226 @@
-# RTSP Camera TCP Tunnel via T5AI DevKit
+# RTSP Camera TCP Tunnel via T5AI DevKit - Implementation Guide
 
 ## Overview
 
-This document describes the implementation plan for creating a TCP tunnel using the T5AI DevKit to forward RTSP camera streams from a local network to a remote VPS.
+This document describes the implemented TCP tunnel for forwarding RTSP camera streams from a local network to a remote VPS through the T5AI DevKit.
 
-## Problem Statement
-
-- **RTSP Camera**: Located on local LAN, not accessible from internet
-- **VPS**: Located on internet, cannot reach camera directly
-- **T5AI DevKit**: Located on same LAN as camera, can reach both camera and VPS
-- **Constraint**: T5AI has only 8MB RAM, cannot run FFmpeg locally
-
-## Solution Architecture
+## Architecture
 
 ```
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
 │  RTSP Camera    │     │  T5AI DevKit    │     │     VPS         │
-│  (Local LAN)    │ TCP │  (TCP Tunnel)   │ TCP │  (Internet)     │
-│  Port 554       │◄────┤                 ├────►│  Port 8554      │
-└─────────────────┘     │                 │     │                 │
-                        │  1. Connect VPS │     │  FFmpeg/GStreamer│
-                        │  2. Connect Cam │     │  processes stream│
-                        │  3. Forward     │     │                 │
-                        └─────────────────┘     └─────────────────┘
+│  (Local LAN)    │ TCP │  (TCP Tunnel)   │ TCP │  13.212.218.43  │
+│  192.168.x.x    │◄────┤                 ├────►│                 │
+│  Port 554       │     │                 │     │  Port 8554      │
+└─────────────────┘     │                 │     │  (RTSP Relay)   │
+                        │                 │     │                 │
+                        │  Control: :5000 │────►│  Port 5000      │
+                        │  (Web App TCP)  │     │  (Web App)      │
+                        └─────────────────┘     │                 │
+                                                │  Port 8555      │
+                                                │  (Local RTSP)   │
+                                                │                 │
+                                                │  FFmpeg/VLC     │
+                                                │  processes      │
+                                                └─────────────────┘
 ```
 
 ## How It Works
 
-1. **T5AI initiates outbound connection** to VPS (bypasses NAT)
-2. **VPS accepts** the connection on a designated port
-3. **T5AI connects** to RTSP camera on local network
-4. **T5AI forwards raw TCP bytes** bidirectionally between both connections
-5. **VPS runs FFmpeg** to decode/process the RTSP stream
+1. **DevKit connects to VPS** on port 5000 (existing web app connection)
+2. **VPS sends command** `rtsp start` via web app
+3. **DevKit connects to local camera** on port 554 (RTSP)
+4. **DevKit connects to VPS** on port 8554 (RTSP tunnel)
+5. **DevKit forwards raw TCP bytes** bidirectionally between camera and VPS
+6. **VPS runs FFmpeg** or other tools to process the stream locally
 
-## Technical Findings from TuyaOpen Codebase
+## Files Implemented
 
-### Available TCP APIs
+### DevKit Firmware
 
-| Function | Description |
-|----------|-------------|
-| `tal_net_socket_create(PROTOCOL_TCP)` | Create TCP socket |
-| `tal_net_str2addr(ip_string)` | Convert IP string to address |
-| `tal_net_connect(sock_fd, ip, port)` | Connect to remote host |
-| `tal_net_send(sock_fd, buffer, len)` | Send data |
-| `tal_net_recv(sock_fd, buffer, len)` | Receive data |
-| `tal_net_close(sock_fd)` | Close socket |
+| File | Purpose |
+|------|---------|
+| `src/rtsp_tunnel.h` | RTSP tunnel API header |
+| `src/rtsp_tunnel.c` | Bidirectional TCP tunnel implementation |
+| `src/tuya_config.h` | RTSP configuration defines |
+| `src/tuya_main.c` | Integrated RTSP tunnel commands |
+| `build_with_env.fish` | Updated build script with RTSP flags |
+| `.env` / `.env.example` | Configuration file |
 
-### Network Stack
+### VPS
 
-- **lwIP 2.1.2** - Lightweight IP stack with TCP support
-- **altcp** - Application layered TCP with proxy connect support
-- Supports both WiFi and Wired connections
+| File | Purpose |
+|------|---------|
+| `webapp/rtsp_relay.js` | Node.js RTSP relay server |
 
-### Reference Examples
+## Configuration
 
-- `examples/protocols/tcp_client/` - TCP client implementation
-- `examples/protocols/tcp_server/` - TCP server implementation
-- `platform/T5AI/t5_os/ap/components/demos/net/tcp_client/` - Platform-specific demo
+### DevKit (.env file)
 
-## Implementation Plan
+```bash
+# RTSP Camera Configuration
+export RTSP_CAMERA_HOST="192.168.1.100"   # Your camera's IP
+export RTSP_CAMERA_PORT="554"              # Usually 554
 
-### Phase 1: Core TCP Tunnel Application
+# VPS Tunnel Endpoint
+export RTSP_VPS_HOST="13.212.218.43"       # Your VPS IP
+export RTSP_VPS_PORT="8554"                # RTSP relay port
 
-Create `/home/uratmangun/CascadeProjects/TuyaOpen/apps/tcp_tunnel/`
-
-#### Files to Create:
-
-```
-apps/tcp_tunnel/
-├── CMakeLists.txt
-├── Kconfig
-├── app_default.config
-├── config/
-│   └── TUYA_T5AI_BOARD.config
-├── include/
-│   └── tcp_tunnel.h
-└── src/
-    ├── tuya_main.c
-    └── tcp_tunnel.c
+# Auto-start: "1" to start on boot, "0" for manual
+export RTSP_TUNNEL_ENABLED="0"
 ```
 
-### Phase 2: Implementation Details
+### VPS Environment
 
-#### 2.1 Configuration (tcp_tunnel.h)
-
-```c
-// VPS Configuration
-#define VPS_HOST        "your-vps.com"
-#define VPS_PORT        8554
-
-// RTSP Camera Configuration
-#define CAMERA_IP       "192.168.1.100"
-#define CAMERA_PORT     554
-
-// WiFi Configuration
-#define WIFI_SSID       "your-wifi-ssid"
-#define WIFI_PASSWORD   "your-wifi-password"
-
-// Buffer Configuration (keep small for 8MB RAM)
-#define TUNNEL_BUFFER_SIZE  4096
+```bash
+# Optional: customize ports
+export RTSP_DEVKIT_PORT=8554    # DevKit connects here
+export RTSP_LOCAL_PORT=8555     # Local RTSP access
+export RTSP_STATUS_PORT=8556    # Status API
 ```
 
-#### 2.2 Main Logic (tcp_tunnel.c)
+## Deployment Guide
 
-```c
-// Pseudocode for TCP tunnel implementation
+### Step 1: Configure DevKit
 
-typedef struct {
-    int vps_sock;
-    int cam_sock;
-    bool running;
-    uint8_t buffer[TUNNEL_BUFFER_SIZE];
-} tunnel_ctx_t;
+1. Edit `/home/uratmangun/CascadeProjects/TuyaOpen/apps/tuya_cloud/object_detection/.env`:
+   ```bash
+   # Set your actual camera IP
+   export RTSP_CAMERA_HOST="YOUR_CAMERA_IP"
+   ```
 
-// Main tunnel task
-void tcp_tunnel_task(void *args) {
-    tunnel_ctx_t ctx = {0};
-    
-    // Step 1: Connect to VPS (outbound - bypasses NAT)
-    ctx.vps_sock = tal_net_socket_create(PROTOCOL_TCP);
-    TUYA_IP_ADDR_T vps_ip = tal_net_str2addr(VPS_HOST);
-    if (tal_net_connect(ctx.vps_sock, vps_ip, VPS_PORT) < 0) {
-        PR_ERR("Failed to connect to VPS");
-        goto cleanup;
-    }
-    PR_NOTICE("Connected to VPS %s:%d", VPS_HOST, VPS_PORT);
-    
-    // Step 2: Wait for VPS "CONNECT" command (optional handshake)
-    // This allows VPS to signal when it's ready
-    
-    // Step 3: Connect to local RTSP camera
-    ctx.cam_sock = tal_net_socket_create(PROTOCOL_TCP);
-    TUYA_IP_ADDR_T cam_ip = tal_net_str2addr(CAMERA_IP);
-    if (tal_net_connect(ctx.cam_sock, cam_ip, CAMERA_PORT) < 0) {
-        PR_ERR("Failed to connect to camera");
-        goto cleanup;
-    }
-    PR_NOTICE("Connected to camera %s:%d", CAMERA_IP, CAMERA_PORT);
-    
-    // Step 4: Bidirectional forwarding loop
-    ctx.running = true;
-    while (ctx.running) {
-        int bytes_read;
-        
-        // Forward: VPS → Camera (RTSP commands)
-        bytes_read = tal_net_recv_nd_fd(ctx.vps_sock, ctx.buffer, 
-                                        TUNNEL_BUFFER_SIZE, 10);
-        if (bytes_read > 0) {
-            tal_net_send(ctx.cam_sock, ctx.buffer, bytes_read);
-        }
-        
-        // Forward: Camera → VPS (RTSP/RTP response)
-        bytes_read = tal_net_recv_nd_fd(ctx.cam_sock, ctx.buffer, 
-                                        TUNNEL_BUFFER_SIZE, 10);
-        if (bytes_read > 0) {
-            tal_net_send(ctx.vps_sock, ctx.buffer, bytes_read);
-        }
-        
-        tal_system_sleep(1); // Yield to other tasks
-    }
-    
-cleanup:
-    if (ctx.cam_sock > 0) tal_net_close(ctx.cam_sock);
-    if (ctx.vps_sock > 0) tal_net_close(ctx.vps_sock);
+2. Build and flash:
+   ```bash
+   cd /home/uratmangun/CascadeProjects/TuyaOpen/apps/tuya_cloud/object_detection
+   ./build_with_env.fish flash
+   ```
+
+### Step 2: Deploy VPS RTSP Relay
+
+1. SSH to your VPS:
+   ```bash
+   ssh ubuntu@100.89.99.57
+   ```
+
+2. Copy the relay script or create it:
+   ```bash
+   cd /path/to/webapp
+   node rtsp_relay.js
+   ```
+
+   Or run with PM2:
+   ```bash
+   pm2 start rtsp_relay.js --name rtsp-relay
+   ```
+
+3. Open firewall port 8554:
+   ```bash
+   sudo ufw allow 8554/tcp
+   ```
+
+### Step 3: Start the Tunnel
+
+**Option A: Via Web App**
+1. Open the web UI
+2. Send command: `rtsp start`
+3. Check status: `rtsp status`
+
+**Option B: Auto-start**
+1. Set `RTSP_TUNNEL_ENABLED="1"` in .env
+2. Rebuild and flash firmware
+
+### Step 4: Access the Stream
+
+On the VPS, use FFmpeg or VLC:
+
+```bash
+# Play the stream
+ffplay tcp://localhost:8555
+
+# Save to file
+ffmpeg -i tcp://localhost:8555 -c copy output.mp4
+
+# Re-stream as HLS
+ffmpeg -i tcp://localhost:8555 -c:v libx264 -f hls /var/www/html/stream.m3u8
+
+# View with VLC
+vlc tcp://localhost:8555
+```
+
+## Commands Reference
+
+Commands sent via the web app TCP connection:
+
+| Command | Response | Description |
+|---------|----------|-------------|
+| `rtsp start` | `ok:rtsp_tunnel_started cam=IP:PORT vps=IP:PORT` | Start tunnel |
+| `rtsp stop` | `ok:rtsp_tunnel_stopped` | Stop tunnel |
+| `rtsp status` | JSON with stats | Get tunnel status |
+
+### Status Response Example
+
+```json
+{
+  "rtsp_active": true,
+  "connected": true,
+  "bytes_to_vps": 1234567,
+  "bytes_to_camera": 12345
 }
 ```
 
-### Phase 3: VPS-Side Setup
+## VPS Status API
 
-#### 3.1 Simple Relay Server (Python)
-
-```python
-#!/usr/bin/env python3
-# vps_rtsp_relay.py
-
-import socket
-import subprocess
-import threading
-
-VPS_PORT = 8554
-
-def handle_tunnel(client_sock):
-    """Handle incoming T5AI connection and pipe to FFmpeg"""
-    print(f"T5AI connected from {client_sock.getpeername()}")
-    
-    # Start FFmpeg to process the RTSP stream
-    ffmpeg_cmd = [
-        'ffmpeg',
-        '-i', 'pipe:0',  # Read from stdin
-        '-c:v', 'copy',  # Copy video codec
-        '-f', 'flv',     # Output format
-        'rtmp://localhost/live/camera'  # Or save to file
-    ]
-    
-    # Alternative: Save to file
-    # ffmpeg_cmd = ['ffmpeg', '-i', 'pipe:0', '-c', 'copy', 'output.mp4']
-    
-    ffmpeg = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
-    
-    try:
-        while True:
-            data = client_sock.recv(4096)
-            if not data:
-                break
-            ffmpeg.stdin.write(data)
-    except Exception as e:
-        print(f"Error: {e}")
-    finally:
-        ffmpeg.stdin.close()
-        ffmpeg.wait()
-        client_sock.close()
-
-def main():
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind(('0.0.0.0', VPS_PORT))
-    server.listen(1)
-    print(f"Listening on port {VPS_PORT}...")
-    
-    while True:
-        client, addr = server.accept()
-        threading.Thread(target=handle_tunnel, args=(client,)).start()
-
-if __name__ == '__main__':
-    main()
-```
-
-#### 3.2 Using socat (One-liner)
+The RTSP relay server provides a status API:
 
 ```bash
-# Listen on port 8554 and pipe to FFmpeg
-socat TCP-LISTEN:8554,reuseaddr,fork \
-    EXEC:'ffmpeg -i - -c copy -f flv rtmp://localhost/live/stream'
+# Check status
+curl http://localhost:8556/status
+
+# Get help
+curl http://localhost:8556/help
 ```
 
-## Memory Considerations
+## Memory Usage
 
-| Component | Estimated RAM Usage |
-|-----------|---------------------|
+| Component | RAM Usage |
+|-----------|-----------|
+| RTSP tunnel task | ~4 KB stack |
 | TCP socket (VPS) | ~2-4 KB |
 | TCP socket (Camera) | ~2-4 KB |
 | Buffer (4KB) | 4 KB |
-| lwIP stack overhead | ~20-40 KB |
-| **Total** | **~30-50 KB** |
+| **Total** | **~14-16 KB** |
 
-With 8MB RAM, this should be very comfortable.
+With 8MB RAM, this is very comfortable.
 
-## Build & Flash Instructions
+## Troubleshooting
 
-```bash
-# Navigate to TuyaOpen directory
-cd /home/uratmangun/CascadeProjects/TuyaOpen
+### Tunnel won't connect to camera
+- Verify camera IP: `ping 192.168.x.x` from a device on same LAN
+- Check camera RTSP port: usually 554
+- Ensure DevKit is on same WiFi network as camera
 
-# Build the tunnel application
-tos build apps/tcp_tunnel
+### Tunnel won't connect to VPS
+- Check VPS firewall: `sudo ufw status`
+- Verify port 8554 is open
+- Check if relay server is running: `curl localhost:8556/status`
 
-# Flash to T5AI
-tos flash apps/tcp_tunnel -p /dev/ttyUSB0
+### No video on FFmpeg
+- RTSP uses interleaved mode over TCP
+- Make sure to wait for RTSP SETUP/PLAY handshake
+- Try: `ffplay -rtsp_transport tcp rtsp://localhost:8555/stream`
 
-# Monitor output
-tos monitor -p /dev/ttyUSB0
-```
+### High latency
+- Increase buffer size in rtsp_tunnel.c if needed
+- Consider using UDP instead of TCP for RTP
 
-## Questions Before Implementation
+## Security Notes
 
-1. **RTSP Camera URL**: What is your camera's RTSP URL format?
-   - Example: `rtsp://192.168.1.100:554/stream1`
-
-2. **VPS Port**: What port should VPS listen on?
-   - Suggested: `8554`
-
-3. **Reconnection**: Should T5AI automatically reconnect on failure?
-   - Recommended: Yes, with exponential backoff
-
-4. **Security**: Do you need TLS encryption for the tunnel?
-   - Optional: T5AI supports TLS via `tuya_tls_transporter_connect`
-
-5. **Authentication**: Should there be a simple handshake/password?
-   - Optional: Can add simple token verification
-
-## Alternative: Tuya Cloud Option
-
-If you prefer using Tuya's cloud infrastructure:
-
-- Use `apps/tuya_cloud/camera_demo/` as reference
-- Requires Tuya Cloud account and product configuration
-- Video streams through Tuya servers
-- Access via Tuya Smart Life app
-
-However, the TCP tunnel approach gives you:
-- Direct control
-- Lower latency
-- No cloud dependency
-- Custom processing on VPS
-
-## Next Steps
-
-1. Confirm configuration details (camera IP, VPS host, WiFi credentials)
-2. Create the TCP tunnel application
-3. Create VPS relay script
-4. Test connection
-5. Add error handling and reconnection logic
-6. Optional: Add TLS encryption
+1. The tunnel uses raw TCP without encryption
+2. Consider adding TLS if security is important
+3. VPS relay only listens on localhost for local access
+4. DevKit port is open publicly - consider firewall rules
 
 ---
 
-*Document created: 2025-12-17*
-*Status: Planning Phase*
+*Document updated: 2025-12-18*
+*Status: Implemented*
