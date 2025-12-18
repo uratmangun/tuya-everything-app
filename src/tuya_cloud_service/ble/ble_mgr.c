@@ -395,34 +395,44 @@ static void ble_pair_timeout_cb(TIMER_ID timer_id, void *arg)
 static void ble_mointor_timer_cb(TIMER_ID timer_id, void *arg)
 {
     static bool s_iot_conn_stat = false;
+    static bool s_ble_adv_started = false;
     tuya_ble_mgr_t *ble = (tuya_ble_mgr_t *)arg;
+
+    /* 
+     * MODIFIED FOR DEVELOPMENT: Always keep BLE advertising active.
+     * This allows Web Bluetooth configuration at any time.
+     * Power consumption is higher but acceptable for mains-powered devices.
+     */
+    
+    /* Ensure BLE advertising is started at least once */
+    if (!s_ble_adv_started && !ble->is_paired) {
+        PR_NOTICE("ble monitor: Starting BLE advertising (dev mode)");
+        ble_adv_update(ble);
+        s_ble_adv_started = true;
+    }
 
     if (tuya_iot_is_connected()) {
         if (s_iot_conn_stat) {
             return;
         }
-        /* 
-         * MODIFIED FOR DEVELOPMENT: Keep BLE advertising even when IoT connected.
-         * This allows Web Bluetooth configuration at any time.
-         * Power consumption is higher but acceptable for mains-powered devices.
-         * 
-         * Original behavior would call:
-         *   tal_ble_advertising_stop() or tal_ble_disconnect()
-         */
-        PR_DEBUG("ble monitor: IoT connected, keeping BLE advertising active (dev mode)");
+        /* In dev mode: Keep advertising even when IoT connected */
+        PR_DEBUG("ble monitor: IoT connected, BLE advertising stays active (dev mode)");
         s_iot_conn_stat = true;
     } else {
         if (!s_iot_conn_stat) {
             return;
         }
         s_iot_conn_stat = false;
-        PR_DEBUG("ble monitor check iot is disconnected, start adv!");
+        PR_DEBUG("ble monitor: IoT disconnected");
         if (ble->is_paired) {
             PR_DEBUG("ble still connected!");
             return;
         }
-
-        ble_adv_update(ble);
+        /* Restart advertising if not already running */
+        if (!s_ble_adv_started) {
+            ble_adv_update(ble);
+            s_ble_adv_started = true;
+        }
     }
 }
 

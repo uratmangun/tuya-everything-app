@@ -644,17 +644,16 @@
             updateConnectionStatus('connecting');
 
             try {
-                // Request device - accepts any Tuya device
-                // Note: Device must be advertising! 
-                // Tuya devices stop advertising when connected to IoT cloud.
+                // Request device - accepts Tuya devices
+                // Device may advertise as "TYBLE", "TY...", or just "BLE"
                 device = await navigator.bluetooth.requestDevice({
                     filters: [
-                        { namePrefix: 'TY' },  // Tuya BLE name is "TYBLE"
-                        { namePrefix: 'tuya' },
-                        { namePrefix: 'T5' }
+                        { namePrefix: 'TY' },      // Tuya BLE name "TYBLE"
+                        { namePrefix: 'tuya' },    // Lowercase variant
+                        { namePrefix: 'T5' },      // T5AI prefix
+                        { name: 'BLE' },           // Generic BLE name (some devices use this)
                     ],
                     optionalServices: [TUYA_SERVICE_UUID, CONFIG_SERVICE_UUID],
-                    // If no devices found with filters, try: acceptAllDevices: true
                 });
 
                 console.log('Device selected:', device.name);
