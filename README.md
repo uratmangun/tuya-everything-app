@@ -33,6 +33,27 @@ A real-time web-based control system for the T5AI DevKit. This system allows you
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
+## 📱 Web Bluetooth Configuration
+
+Configure your DevKit locally via Bluetooth when the VPS is unreachable!
+
+🔗 **Configuration Page**: https://ble-config-web.vercel.app
+
+### Features
+- **Set TCP Server**: Configure host, port, and auth token
+- **Set WiFi Network**: Scan and connect to new WiFi networks  
+- **View Status**: Check device connection status
+- **Reboot Device**: Remotely restart the DevKit
+
+### How to Use
+1. Open https://ble-config-web.vercel.app on Chrome/Edge (Android, Windows, macOS, Linux)
+2. Click **Connect to T5AI**
+3. Select your DevKit from the Bluetooth device picker
+4. Configure WiFi and TCP settings as needed
+5. Click **Reboot** to apply changes
+
+> ⚠️ **Note**: Web Bluetooth is not supported on Safari (iPhone). Use Chrome on Android or desktop.
+
 ## Components
 
 ### 1. Web Application (`/webapp`)

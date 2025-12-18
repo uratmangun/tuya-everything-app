@@ -1,0 +1,938 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>T5AI DevKit Configuration</title>
+    <meta name="description" content="Configure your T5AI DevKit via Bluetooth - Set WiFi and TCP server settings">
+    <link rel="icon"
+        href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚙️</text></svg>">
+    <style>
+        :root {
+            --bg-primary: #0a0a0a;
+            --bg-secondary: #111827;
+            --bg-card: rgba(17, 24, 39, 0.8);
+            --border-color: #1f2937;
+            --text-primary: #f9fafb;
+            --text-secondary: #9ca3af;
+            --text-muted: #6b7280;
+            --accent: #0ea5e9;
+            --accent-hover: #0284c7;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --bluetooth: #0082fc;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-secondary) 100%);
+            color: var(--text-primary);
+            min-height: 100vh;
+            padding: 16px;
+        }
+
+        .container {
+            max-width: 480px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            padding: 24px 0;
+        }
+
+        .header h1 {
+            font-size: 28px;
+            font-weight: 700;
+            margin-bottom: 8px;
+            background: linear-gradient(135deg, var(--accent) 0%, #22d3ee 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .header p {
+            color: var(--text-secondary);
+            font-size: 14px;
+        }
+
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 24px;
+            margin-bottom: 16px;
+            backdrop-filter: blur(10px);
+        }
+
+        .card-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        .card-header h2 {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .card-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+        }
+
+        .card-icon.bluetooth {
+            background: rgba(0, 130, 252, 0.15);
+        }
+
+        .card-icon.wifi {
+            background: rgba(16, 185, 129, 0.15);
+        }
+
+        .card-icon.server {
+            background: rgba(14, 165, 233, 0.15);
+        }
+
+        .card-icon.status {
+            background: rgba(245, 158, 11, 0.15);
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 12px 16px;
+            background: var(--bg-secondary);
+            border-radius: 10px;
+            margin-bottom: 16px;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--danger);
+        }
+
+        .status-dot.connected {
+            background: var(--success);
+        }
+
+        .status-dot.connecting {
+            background: var(--warning);
+            animation: pulse 1s infinite;
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.5;
+            }
+        }
+
+        .status-text {
+            font-size: 14px;
+            color: var(--text-secondary);
+        }
+
+        .btn {
+            width: 100%;
+            padding: 14px 20px;
+            border: none;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            transition: all 0.2s ease;
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--accent) 0%, var(--accent-hover) 100%);
+            color: white;
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(14, 165, 233, 0.3);
+        }
+
+        .btn-bluetooth {
+            background: linear-gradient(135deg, var(--bluetooth) 0%, #0066cc 100%);
+            color: white;
+        }
+
+        .btn-bluetooth:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(0, 130, 252, 0.3);
+        }
+
+        .btn-danger {
+            background: linear-gradient(135deg, var(--danger) 0%, #dc2626 100%);
+            color: white;
+        }
+
+        .btn-secondary {
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            border: 1px solid var(--border-color);
+        }
+
+        .form-group {
+            margin-bottom: 16px;
+        }
+
+        .form-group label {
+            display: block;
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+
+        .form-group input,
+        .form-group select {
+            width: 100%;
+            padding: 14px 16px;
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            font-size: 16px;
+            transition: all 0.2s;
+        }
+
+        .form-group input:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.15);
+        }
+
+        .form-group input::placeholder {
+            color: var(--text-muted);
+        }
+
+        .wifi-list {
+            max-height: 200px;
+            overflow-y: auto;
+            margin-bottom: 16px;
+        }
+
+        .wifi-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 16px;
+            background: var(--bg-secondary);
+            border-radius: 10px;
+            margin-bottom: 8px;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: 2px solid transparent;
+        }
+
+        .wifi-item:hover {
+            border-color: var(--border-color);
+        }
+
+        .wifi-item.selected {
+            border-color: var(--accent);
+            background: rgba(14, 165, 233, 0.1);
+        }
+
+        .wifi-item .ssid {
+            font-weight: 500;
+        }
+
+        .wifi-item .signal {
+            color: var(--text-muted);
+            font-size: 14px;
+        }
+
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .info-row:last-child {
+            border-bottom: none;
+        }
+
+        .info-label {
+            color: var(--text-muted);
+            font-size: 14px;
+        }
+
+        .info-value {
+            color: var(--text-primary);
+            font-size: 14px;
+            font-family: ui-monospace, monospace;
+        }
+
+        .toast {
+            position: fixed;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%) translateY(100px);
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            padding: 14px 24px;
+            border-radius: 12px;
+            font-size: 14px;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            transition: transform 0.3s ease;
+            z-index: 1000;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+        }
+
+        .toast.show {
+            transform: translateX(-50%) translateY(0);
+        }
+
+        .toast.success {
+            border-color: var(--success);
+        }
+
+        .toast.error {
+            border-color: var(--danger);
+        }
+
+        .hidden {
+            display: none !important;
+        }
+
+        .spinner {
+            width: 20px;
+            height: 20px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        .section-divider {
+            height: 1px;
+            background: var(--border-color);
+            margin: 20px 0;
+        }
+
+        .not-supported {
+            text-align: center;
+            padding: 40px;
+        }
+
+        .not-supported h2 {
+            color: var(--danger);
+            margin-bottom: 16px;
+        }
+
+        .not-supported p {
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+
+        .footer {
+            text-align: center;
+            padding: 24px;
+            color: var(--text-muted);
+            font-size: 12px;
+        }
+
+        .tabs {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+
+        .tab {
+            flex: 1;
+            padding: 12px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            color: var(--text-secondary);
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            text-align: center;
+        }
+
+        .tab.active {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: white;
+        }
+
+        .tab:hover:not(.active) {
+            border-color: var(--text-muted);
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>⚙️ T5AI Configuration</h1>
+            <p>Configure your DevKit via Bluetooth</p>
+        </div>
+
+        <!-- Not Supported Message -->
+        <div id="notSupported" class="card not-supported hidden">
+            <h2>❌ Web Bluetooth Not Supported</h2>
+            <p>Your browser doesn't support Web Bluetooth.</p>
+            <p>Please use <strong>Chrome</strong>, <strong>Edge</strong>, or <strong>Opera</strong> on:</p>
+            <p>• Android, Windows, macOS, or Linux</p>
+            <p style="margin-top: 16px; color: var(--text-muted);">
+                Note: Safari (iPhone) does not support Web Bluetooth.
+            </p>
+        </div>
+
+        <!-- Main Content -->
+        <div id="mainContent">
+            <!-- Bluetooth Connection Card -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-icon bluetooth">📶</div>
+                    <h2>Bluetooth Connection</h2>
+                </div>
+
+                <div class="status-indicator">
+                    <div class="status-dot" id="connectionDot"></div>
+                    <span class="status-text" id="connectionStatus">Not Connected</span>
+                </div>
+
+                <button class="btn btn-bluetooth" id="connectBtn" onclick="connectDevice()">
+                    <span>🔗</span> Connect to T5AI
+                </button>
+
+                <button class="btn btn-danger hidden" id="disconnectBtn" onclick="disconnectDevice()"
+                    style="margin-top: 12px;">
+                    <span>❌</span> Disconnect
+                </button>
+            </div>
+
+            <!-- Configuration Tabs (only visible when connected) -->
+            <div id="configSection" class="hidden">
+                <div class="tabs">
+                    <div class="tab active" data-tab="tcp" onclick="switchTab('tcp')">🌐 TCP Server</div>
+                    <div class="tab" data-tab="wifi" onclick="switchTab('wifi')">📡 WiFi</div>
+                    <div class="tab" data-tab="status" onclick="switchTab('status')">📊 Status</div>
+                </div>
+
+                <!-- TCP Server Config -->
+                <div class="card tab-content" id="tcpTab">
+                    <div class="card-header">
+                        <div class="card-icon server">🌐</div>
+                        <h2>TCP Server Settings</h2>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Server Host</label>
+                        <input type="text" id="tcpHost" placeholder="e.g., 192.168.1.100 or example.com">
+                    </div>
+
+                    <div class="form-group">
+                        <label>Server Port</label>
+                        <input type="number" id="tcpPort" placeholder="5000" value="5000" min="1" max="65535">
+                    </div>
+
+                    <div class="form-group">
+                        <label>Auth Token</label>
+                        <input type="text" id="tcpToken" placeholder="your-secret-token">
+                    </div>
+
+                    <button class="btn btn-primary" onclick="saveTcpSettings()">
+                        <span>💾</span> Save TCP Settings
+                    </button>
+                </div>
+
+                <!-- WiFi Config -->
+                <div class="card tab-content hidden" id="wifiTab">
+                    <div class="card-header">
+                        <div class="card-icon wifi">📡</div>
+                        <h2>WiFi Configuration</h2>
+                    </div>
+
+                    <button class="btn btn-secondary" onclick="scanWifi()" id="scanWifiBtn"
+                        style="margin-bottom: 16px;">
+                        <span>🔍</span> Scan WiFi Networks
+                    </button>
+
+                    <div class="wifi-list" id="wifiList">
+                        <div style="text-align: center; color: var(--text-muted); padding: 20px;">
+                            Click "Scan WiFi Networks" to find available networks
+                        </div>
+                    </div>
+
+                    <div class="section-divider"></div>
+
+                    <div class="form-group">
+                        <label>WiFi SSID</label>
+                        <input type="text" id="wifiSsid" placeholder="Network name">
+                    </div>
+
+                    <div class="form-group">
+                        <label>WiFi Password</label>
+                        <input type="password" id="wifiPassword" placeholder="Enter password">
+                    </div>
+
+                    <button class="btn btn-primary" onclick="saveWifiSettings()">
+                        <span>📡</span> Connect to WiFi
+                    </button>
+                </div>
+
+                <!-- Status Tab -->
+                <div class="card tab-content hidden" id="statusTab">
+                    <div class="card-header">
+                        <div class="card-icon status">📊</div>
+                        <h2>Device Status</h2>
+                    </div>
+
+                    <button class="btn btn-secondary" onclick="refreshStatus()" style="margin-bottom: 16px;">
+                        <span>🔄</span> Refresh Status
+                    </button>
+
+                    <div id="statusInfo">
+                        <div class="info-row">
+                            <span class="info-label">WiFi Status</span>
+                            <span class="info-value" id="wifiStatus">--</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">WiFi SSID</span>
+                            <span class="info-value" id="currentSsid">--</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">IP Address</span>
+                            <span class="info-value" id="ipAddress">--</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">TCP Server</span>
+                            <span class="info-value" id="tcpServerStatus">--</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">Free Heap</span>
+                            <span class="info-value" id="freeHeap">--</span>
+                        </div>
+                    </div>
+
+                    <div class="section-divider"></div>
+
+                    <button class="btn btn-danger" onclick="rebootDevice()">
+                        <span>🔄</span> Reboot Device
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div class="footer">
+            T5AI DevKit • Web Bluetooth Configuration<br>
+            Powered by TuyaOpen
+        </div>
+    </div>
+
+    <!-- Toast -->
+    <div class="toast" id="toast">
+        <span id="toastIcon">✅</span>
+        <span id="toastMessage">Message</span>
+    </div>
+
+    <script>
+        // ===== Configuration =====
+        // Tuya BLE Service UUID (standard Tuya)
+        const TUYA_SERVICE_UUID = '0000a201-0000-1000-8000-00805f9b34fb';
+        const TUYA_WRITE_UUID = '0000a202-0000-1000-8000-00805f9b34fb';
+        const TUYA_NOTIFY_UUID = '0000a203-0000-1000-8000-00805f9b34fb';
+
+        // Alternative: Custom service for simple config (we'll try both)
+        const CONFIG_SERVICE_UUID = '0000ff01-0000-1000-8000-00805f9b34fb';
+        const CONFIG_WRITE_UUID = '0000ff02-0000-1000-8000-00805f9b34fb';
+        const CONFIG_READ_UUID = '0000ff03-0000-1000-8000-00805f9b34fb';
+
+        // Device name prefix to filter
+        const DEVICE_NAME_PREFIX = 'T5AI';
+
+        // ===== State =====
+        let device = null;
+        let server = null;
+        let writeCharacteristic = null;
+        let notifyCharacteristic = null;
+        let currentTab = 'tcp';
+
+        // ===== Initialization =====
+        document.addEventListener('DOMContentLoaded', () => {
+            // Check Web Bluetooth support
+            if (!navigator.bluetooth) {
+                document.getElementById('notSupported').classList.remove('hidden');
+                document.getElementById('mainContent').classList.add('hidden');
+                return;
+            }
+        });
+
+        // ===== Tab Switching =====
+        function switchTab(tabName) {
+            currentTab = tabName;
+
+            // Update tab buttons
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelector(`.tab[data-tab="${tabName}"]`).classList.add('active');
+
+            // Update tab content
+            document.querySelectorAll('.tab-content').forEach(c => c.classList.add('hidden'));
+            document.getElementById(`${tabName}Tab`).classList.remove('hidden');
+        }
+
+        // ===== Bluetooth Functions =====
+        async function connectDevice() {
+            const btn = document.getElementById('connectBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<div class="spinner"></div> Connecting...';
+
+            updateConnectionStatus('connecting');
+
+            try {
+                // Request device
+                device = await navigator.bluetooth.requestDevice({
+                    filters: [
+                        { namePrefix: DEVICE_NAME_PREFIX },
+                        { namePrefix: 'TY' },
+                        { namePrefix: 'tuya' }
+                    ],
+                    optionalServices: [TUYA_SERVICE_UUID, CONFIG_SERVICE_UUID]
+                });
+
+                console.log('Device selected:', device.name);
+
+                // Connect to GATT server
+                device.addEventListener('gattserverdisconnected', onDisconnected);
+                server = await device.gatt.connect();
+
+                console.log('Connected to GATT server');
+
+                // Try to get service and characteristics
+                try {
+                    const service = await server.getPrimaryService(TUYA_SERVICE_UUID);
+                    writeCharacteristic = await service.getCharacteristic(TUYA_WRITE_UUID);
+                    notifyCharacteristic = await service.getCharacteristic(TUYA_NOTIFY_UUID);
+
+                    // Enable notifications
+                    await notifyCharacteristic.startNotifications();
+                    notifyCharacteristic.addEventListener('characteristicvaluechanged', handleNotification);
+
+                    console.log('Tuya BLE service connected');
+                } catch (e) {
+                    console.log('Tuya service not found, trying config service...', e);
+
+                    try {
+                        const service = await server.getPrimaryService(CONFIG_SERVICE_UUID);
+                        writeCharacteristic = await service.getCharacteristic(CONFIG_WRITE_UUID);
+                        const readChar = await service.getCharacteristic(CONFIG_READ_UUID);
+
+                        await readChar.startNotifications();
+                        readChar.addEventListener('characteristicvaluechanged', handleNotification);
+                        notifyCharacteristic = readChar;
+
+                        console.log('Config service connected');
+                    } catch (e2) {
+                        console.warn('No config service found, using device info only');
+                    }
+                }
+
+                // Update UI
+                updateConnectionStatus('connected');
+                document.getElementById('configSection').classList.remove('hidden');
+                btn.classList.add('hidden');
+                document.getElementById('disconnectBtn').classList.remove('hidden');
+
+                showToast('✅', 'Connected to ' + device.name, 'success');
+
+                // Request initial status
+                setTimeout(() => refreshStatus(), 500);
+
+            } catch (error) {
+                console.error('Connection error:', error);
+                updateConnectionStatus('disconnected');
+                showToast('❌', 'Connection failed: ' + error.message, 'error');
+            }
+
+            btn.disabled = false;
+            btn.innerHTML = '<span>🔗</span> Connect to T5AI';
+        }
+
+        function disconnectDevice() {
+            if (device && device.gatt.connected) {
+                device.gatt.disconnect();
+            }
+        }
+
+        function onDisconnected() {
+            console.log('Device disconnected');
+            updateConnectionStatus('disconnected');
+            document.getElementById('configSection').classList.add('hidden');
+            document.getElementById('connectBtn').classList.remove('hidden');
+            document.getElementById('disconnectBtn').classList.add('hidden');
+
+            device = null;
+            server = null;
+            writeCharacteristic = null;
+            notifyCharacteristic = null;
+
+            showToast('⚠️', 'Device disconnected', 'error');
+        }
+
+        function updateConnectionStatus(status) {
+            const dot = document.getElementById('connectionDot');
+            const text = document.getElementById('connectionStatus');
+
+            dot.className = 'status-dot';
+
+            switch (status) {
+                case 'connected':
+                    dot.classList.add('connected');
+                    text.textContent = 'Connected to ' + (device?.name || 'Device');
+                    break;
+                case 'connecting':
+                    dot.classList.add('connecting');
+                    text.textContent = 'Connecting...';
+                    break;
+                default:
+                    text.textContent = 'Not Connected';
+            }
+        }
+
+        // ===== Data Handling =====
+        function handleNotification(event) {
+            const value = event.target.value;
+            const data = new Uint8Array(value.buffer);
+            const text = new TextDecoder().decode(data);
+
+            console.log('Received:', text);
+
+            try {
+                const response = JSON.parse(text);
+                handleResponse(response);
+            } catch (e) {
+                // Plain text response
+                handleTextResponse(text);
+            }
+        }
+
+        function handleResponse(response) {
+            console.log('Parsed response:', response);
+
+            if (response.type === 'status') {
+                updateStatusDisplay(response);
+            } else if (response.type === 'wifi_scan') {
+                displayWifiList(response.networks || []);
+            } else if (response.type === 'ack') {
+                showToast('✅', response.message || 'Command successful', 'success');
+            } else if (response.type === 'error') {
+                showToast('❌', response.message || 'Command failed', 'error');
+            }
+        }
+
+        function handleTextResponse(text) {
+            if (text.startsWith('ok:')) {
+                showToast('✅', text.substring(3), 'success');
+            } else if (text.startsWith('error:')) {
+                showToast('❌', text.substring(6), 'error');
+            }
+        }
+
+        async function sendCommand(cmd) {
+            if (!writeCharacteristic) {
+                showToast('❌', 'Not connected to device', 'error');
+                return false;
+            }
+
+            try {
+                const encoder = new TextEncoder();
+                const data = encoder.encode(JSON.stringify(cmd));
+                await writeCharacteristic.writeValue(data);
+                console.log('Sent:', cmd);
+                return true;
+            } catch (error) {
+                console.error('Send error:', error);
+                showToast('❌', 'Failed to send command', 'error');
+                return false;
+            }
+        }
+
+        // ===== TCP Settings =====
+        async function saveTcpSettings() {
+            const host = document.getElementById('tcpHost').value.trim();
+            const port = parseInt(document.getElementById('tcpPort').value) || 5000;
+            const token = document.getElementById('tcpToken').value.trim();
+
+            if (!host) {
+                showToast('⚠️', 'Please enter server host', 'error');
+                return;
+            }
+
+            const cmd = {
+                cmd: 'set_tcp',
+                host: host,
+                port: port,
+                token: token
+            };
+
+            if (await sendCommand(cmd)) {
+                showToast('✅', 'TCP settings saved! Reboot to apply.', 'success');
+            }
+        }
+
+        // ===== WiFi Settings =====
+        async function scanWifi() {
+            const btn = document.getElementById('scanWifiBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<div class="spinner"></div> Scanning...';
+
+            await sendCommand({ cmd: 'wifi_scan' });
+
+            setTimeout(() => {
+                btn.disabled = false;
+                btn.innerHTML = '<span>🔍</span> Scan WiFi Networks';
+            }, 3000);
+        }
+
+        function displayWifiList(networks) {
+            const container = document.getElementById('wifiList');
+
+            if (networks.length === 0) {
+                container.innerHTML = '<div style="text-align: center; color: var(--text-muted); padding: 20px;">No networks found</div>';
+                return;
+            }
+
+            container.innerHTML = networks.map(net => `
+                <div class="wifi-item" onclick="selectWifi('${net.ssid}')">
+                    <span class="ssid">${net.ssid}</span>
+                    <span class="signal">${getSignalIcon(net.rssi)} ${net.rssi} dBm</span>
+                </div>
+            `).join('');
+        }
+
+        function getSignalIcon(rssi) {
+            if (rssi > -50) return '📶';
+            if (rssi > -70) return '📶';
+            return '📶';
+        }
+
+        function selectWifi(ssid) {
+            // Update selection UI
+            document.querySelectorAll('.wifi-item').forEach(el => el.classList.remove('selected'));
+            event.target.closest('.wifi-item').classList.add('selected');
+
+            // Fill in SSID
+            document.getElementById('wifiSsid').value = ssid;
+            document.getElementById('wifiPassword').focus();
+        }
+
+        async function saveWifiSettings() {
+            const ssid = document.getElementById('wifiSsid').value.trim();
+            const password = document.getElementById('wifiPassword').value;
+
+            if (!ssid) {
+                showToast('⚠️', 'Please enter WiFi SSID', 'error');
+                return;
+            }
+
+            const cmd = {
+                cmd: 'set_wifi',
+                ssid: ssid,
+                password: password
+            };
+
+            if (await sendCommand(cmd)) {
+                showToast('✅', 'WiFi settings saved! Connecting...', 'success');
+            }
+        }
+
+        // ===== Status =====
+        async function refreshStatus() {
+            await sendCommand({ cmd: 'get_status' });
+        }
+
+        function updateStatusDisplay(data) {
+            document.getElementById('wifiStatus').textContent = data.wifi_connected ? '✅ Connected' : '❌ Disconnected';
+            document.getElementById('currentSsid').textContent = data.ssid || '--';
+            document.getElementById('ipAddress').textContent = data.ip || '--';
+            document.getElementById('tcpServerStatus').textContent = data.tcp_connected ? '✅ Connected' : '❌ Disconnected';
+            document.getElementById('freeHeap').textContent = data.heap ? `${data.heap} bytes` : '--';
+
+            // Update TCP settings if available
+            if (data.tcp_host) {
+                document.getElementById('tcpHost').value = data.tcp_host;
+            }
+            if (data.tcp_port) {
+                document.getElementById('tcpPort').value = data.tcp_port;
+            }
+        }
+
+        async function rebootDevice() {
+            if (confirm('Are you sure you want to reboot the device?')) {
+                await sendCommand({ cmd: 'reboot' });
+                showToast('🔄', 'Device is rebooting...', 'success');
+            }
+        }
+
+        // ===== Toast =====
+        function showToast(icon, message, type = '') {
+            const toast = document.getElementById('toast');
+            const toastIcon = document.getElementById('toastIcon');
+            const toastMessage = document.getElementById('toastMessage');
+
+            toast.className = 'toast ' + type;
+            toastIcon.textContent = icon;
+            toastMessage.textContent = message;
+
+            toast.classList.add('show');
+
+            setTimeout(() => {
+                toast.classList.remove('show');
+            }, 3000);
+        }
+    </script>
+</body>
+
+</html>

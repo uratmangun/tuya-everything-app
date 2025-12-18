@@ -34,3 +34,7 @@ what/
 explainer-video/node_modules/
 explainer-video/out/
 explainer-video/.cache/
+
+# BLE Config Web
+ble-config-web/.vercel/
+ble-config-web/node_modules/

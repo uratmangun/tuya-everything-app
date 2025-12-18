@@ -34,6 +34,9 @@
 #include "ai_audio.h"
 #include "alert_audio_data.h"
 
+/* BLE configuration for Web Bluetooth */
+#include "ble_config.h"
+
 extern void tal_kv_cmd(int argc, char *argv[]);
 extern void netmgr_cmd(int argc, char *argv[]);
 
@@ -210,6 +213,35 @@ static void audio_test(int argc, char *argv[])
 }
 
 /**
+ * @brief Show current TCP server settings
+ *
+ * @param argc
+ * @param argv
+ */
+static void config_show(int argc, char *argv[])
+{
+    char host[64] = "";
+    uint16_t port = 5000;
+    char token[64] = "";
+    
+    if (ble_config_load_tcp_settings(host, &port, token) == OPRT_OK) {
+        PR_NOTICE("Saved TCP Settings:");
+        PR_NOTICE("  Host:  %s", host);
+        PR_NOTICE("  Port:  %d", port);
+        PR_NOTICE("  Token: %s", token[0] ? "****" : "(not set)");
+    } else {
+        PR_NOTICE("No saved TCP settings found.");
+        PR_NOTICE("Using compile-time defaults from .env file.");
+    }
+    
+    PR_NOTICE("");
+    PR_NOTICE("To configure via Bluetooth:");
+    PR_NOTICE("  1. Open https://ble-config-web.vercel.app");
+    PR_NOTICE("  2. Connect to this device");
+    PR_NOTICE("  3. Update settings and save");
+}
+
+/**
  * @brief cli cmd list
  *
  */
@@ -223,6 +255,7 @@ static cli_cmd_t s_cli_cmd[] = {
     {.name = "mem", .func = mem, .help = "mem size"},
     {.name = "netmgr", .func = netmgr_cmd, .help = "netmgr cmd"},
     {.name = "audio", .func = audio_test, .help = "audio test <play|stop|vol>"},
+    {.name = "config", .func = config_show, .help = "show TCP config & BLE setup info"},
 };
 
 /**

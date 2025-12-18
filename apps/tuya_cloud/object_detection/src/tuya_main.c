@@ -48,6 +48,9 @@
 /* TCP client for web app communication */
 #include "tcp_client.h"
 
+/* BLE configuration for Web Bluetooth */
+#include "ble_config.h"
+
 /* Switch DP ID - typically DP 1 for switch products */
 #define SWITCH_DP_ID         1
 /* Volume DP ID - DP 3 for volume control */
@@ -613,14 +616,38 @@ void user_main(void)
 
     reset_netconfig_check();
 
+    /* Initialize BLE configuration handler */
+    ble_config_init();
+
     /* Initialize TCP client for web app communication */
-    PR_NOTICE("============================================");
-    PR_NOTICE("     WEB APP CONNECTION");
-    PR_NOTICE("============================================");
-    PR_NOTICE("TCP Server: %s:%d", TCP_SERVER_HOST, TCP_SERVER_PORT);
-    PR_NOTICE("============================================");
+    /* First try to load saved settings from KV storage */
+    char tcp_host[64] = "";
+    uint16_t tcp_port = TCP_SERVER_PORT;
+    char tcp_token[64] = "";
     
-    if (tcp_client_init(TCP_SERVER_HOST, TCP_SERVER_PORT, tcp_message_callback) == OPRT_OK) {
+    if (ble_config_load_tcp_settings(tcp_host, &tcp_port, tcp_token) == OPRT_OK && tcp_host[0]) {
+        PR_NOTICE("============================================");
+        PR_NOTICE("     WEB APP CONNECTION (SAVED)");
+        PR_NOTICE("============================================");
+        PR_NOTICE("TCP Server: %s:%d", tcp_host, tcp_port);
+        PR_NOTICE("(Settings loaded from flash storage)");
+        PR_NOTICE("Configure: https://ble-config-web.vercel.app");
+        PR_NOTICE("============================================");
+    } else {
+        /* Use compile-time defaults */
+        strncpy(tcp_host, TCP_SERVER_HOST, sizeof(tcp_host) - 1);
+        tcp_port = TCP_SERVER_PORT;
+        
+        PR_NOTICE("============================================");
+        PR_NOTICE("     WEB APP CONNECTION (DEFAULT)");
+        PR_NOTICE("============================================");
+        PR_NOTICE("TCP Server: %s:%d", tcp_host, tcp_port);
+        PR_NOTICE("(Using compile-time defaults from .env)");
+        PR_NOTICE("Configure: https://ble-config-web.vercel.app");
+        PR_NOTICE("============================================");
+    }
+    
+    if (tcp_client_init(tcp_host, tcp_port, tcp_message_callback) == OPRT_OK) {
         tcp_client_start();
         PR_INFO("TCP client started - will connect to web app server");
     } else {
