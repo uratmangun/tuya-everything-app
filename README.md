@@ -1,104 +1,254 @@
-<p align="center">
-<img src="https://images.tuyacn.com/fe-static/docs/img/c128362b-eb25-4512-b5f2-ad14aae2395c.jpg" width="100%" >
-</p>
+# T5AI DevKit Web Controller
 
-<p align="center">
-  <a href="https://tuyaopen.ai/docs/quick_start/enviroment-setup">Quick Start</a> ·
-  <a href="https://developer.tuya.com/en/docs/iot/ai-agent-management?id=Kdxr4v7uv4fud">Tuya AI Agent</a> ·
-  <a href="https://tuyaopen.ai/docs/about-tuyaopen">Documentation</a> ·
-  <a href="https://tuyaopen.ai/docs/hardware-specific/t5-ai-board/overview-t5-ai-board">Hardware Resource</a>
-</p>
+A real-time web-based control system for the T5AI DevKit. This system allows you to send commands to your DevKit from a web browser via TCP connection through a VPS.
 
-<p align="center">
-    <a href="https://tuyaopen.ai" target="_blank">
-        <img alt="Static Badge" src="https://img.shields.io/badge/Product-F04438"></a>
-    <a href="https://tuyaopen.ai/pricing" target="_blank">
-        <img alt="Static Badge" src="https://img.shields.io/badge/free-pricing?logo=free&color=%20%23155EEF&label=pricing&labelColor=%20%23528bff"></a>
-    <a href="https://discord.gg/cbGrBjx7" target="_blank">
-        <img src="https://img.shields.io/badge/Discord-Join%20Chat-5462eb?logo=discord&labelColor=%235462eb&logoColor=%23f5f5f5&color=%235462eb"
-            alt="chat on Discord"></a>
-    <a href="https://www.youtube.com/@tuya2023" target="_blank">
-        <img src="https://img.shields.io/badge/YouTube-Subscribe-red?logo=youtube&labelColor=white"
-            alt="Subscribe on YouTube"></a>
-    <a href="https://x.com/tuyasmart" target="_blank">
-        <img src="https://img.shields.io/twitter/follow/tuyasmart?logo=X&color=%20%23f5f5f5"
-            alt="follow on X(Twitter)"></a>
-    <a href="https://www.linkedin.com/company/tuya-smart/" target="_blank">
-        <img src="https://custom-icon-badges.demolab.com/badge/LinkedIn-0A66C2?logo=linkedin-white&logoColor=fff"
-            alt="follow on LinkedIn"></a>
-    <a href="https://github.com/tuya/tuyaopen/graphs/commit-activity?branch=dev" target="_blank">
-        <img alt="Commits last month (dev branch)" src="https://img.shields.io/github/commit-activity/m/tuya/tuyaopen/dev?labelColor=%2332b583&color=%2312b76a"></a>
-    <a href="https://github.com/langgenius/dify/" target="_blank">
-        <img alt="Issues closed" src="https://img.shields.io/github/issues-search?query=repo%3Atuya%2Ftuyaopen%20is%3Aclosed&label=issues%20closed&labelColor=%20%237d89b0&color=%20%235d6b98"></a>
-</p>
+## Architecture
 
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ VPS (with Cloudflare Tunnel)                                       │
+│                                                                     │
+│  ┌─────────────────────────────────────────────────────────────┐  │
+│  │ tuya-webapp (podman container)                              │  │
+│  │                                                              │  │
+│  │  Port 3000: HTTP + WebSocket (via Cloudflare tunnel)        │  │
+│  │  Port 5000: TCP Server (for DevKit connection)              │  │
+│  └──────────────────────────────┬───────────────────────────────┘  │
+│                                 │                                   │
+│  ┌──────────────────────────────┴───────────────────────────────┐  │
+│  │ cloudflared (Cloudflare Tunnel)                              │  │
+│  │ Exposes port 3000 as https://your-domain.example.com        │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────┘
+                                   │
+                              Internet
+                                   │
+┌──────────────────────────────────┼──────────────────────────────────┐
+│ T5AI DevKit                      │                                  │
+│                                  ▼                                  │
+│  - Connects to VPS:5000 via TCP                                    │
+│  - Sends auth token for secure connection                          │
+│  - Receives commands from web UI                                   │
+│  - Responds with status, plays audio, etc.                         │
+└─────────────────────────────────────────────────────────────────────┘
+```
 
+## Components
 
-<p align="center">
-  <a href="./README.md"><img alt="README in English" src="https://img.shields.io/badge/English-d9d9d9"></a>
-  <a href="./README_zh.md"><img alt="简体中文版自述文件" src="https://img.shields.io/badge/简体中文-d9d9d9"></a>
-</p>
+### 1. Web Application (`/webapp`)
 
+Node.js server that provides:
+- **Web UI**: Beautiful dashboard to control the DevKit
+- **WebSocket**: Real-time communication with the web browser
+- **TCP Server**: Receives connections from the DevKit
 
-## Overview
+### 2. DevKit Firmware (`/apps/tuya_cloud/object_detection`)
 
-TuyaOpen powers next-gen AI-agent hardware: it supports gear (Tuya T-Series WIFI/BT MCUs, Pi, ESP32s) via its flexible, cross-platform C/C++ SDK, pairs with Tuya Cloud’s low-latency multimodal AI (drag-and-drop workflows), integrates top models (ChatGPT, Gemini, Qwen, Doubao etc.), and streamlines open AI-IoT ecosystem building.
+Tuya-based firmware for T5AI DevKit that:
+- Connects to VPS via TCP
+- Authenticates with a secret token
+- Handles commands (ping, status, audio play, switch, etc.)
+- Reports back to web UI
 
-![TuyaOpen One Pager](https://images.tuyacn.com/fe-static/docs/img/2eed8b23-0459-4db4-8f17-e7cce8b36b8a.png)
+## Quick Setup
 
+### Prerequisites
 
-### 🚀 With TuyaOpen, you can:
-- Develop hardware products featuring speech technologies such as `ASR` (Automatic Speech Recognition), `KWS` (Keyword Spotting), `TTS` (Text-to-Speech), and `STT` (Speech-to-Text)
-- Integrate with leading LLMs and AI platforms, including `Deepseek`, `ChatGPT`, `Claude`, `Gemini`, and more.
-- Build smart devices with `advanced multimodal AI capabilities`, including voice, vision, and sensor-based features
-- Create custom products and seamlessly connect them to Tuya Cloud for `remote control`, `monitoring`, and `OTA updates`
-- Develop devices compatible with `Google Home` and `Amazon Alexa`
-- Design custom `Powered by Tuya` hardware
-- Target a wide range of hardware applications using `Bluetooth`, `Wi-Fi`, `Ethernet`, and more
-- Benefit from robust built-in `security`, `device authentication`, and `data encryption`
+- T5AI DevKit with USB connection
+- VPS with Docker/Podman installed
+- Cloudflare account with a domain
+- Python 3.x (for Tuya build tools)
 
+### 1. Configure DevKit Firmware
 
-Whether you’re creating smart home products, industrial IoT solutions, or custom AI applications, TuyaOpen provides the tools and examples to get started quickly and scale your ideas across platforms.
+```bash
+cd apps/tuya_cloud/object_detection
 
+# Copy and edit the environment file
+cp .env.example .env
 
-### TuyaOpen SDK Framework
-<p align="center">
-<img src="https://images.tuyacn.com/fe-static/docs/img/25713212-9840-4cf5-889c-6f55476a59f9.jpg" width="80%" >
-</p>
+# Edit .env with your values:
+# - TUYA_PRODUCT_ID: Your Tuya product ID
+# - TUYA_OPENSDK_UUID: Your license UUID
+# - TUYA_OPENSDK_AUTHKEY: Your license auth key
+# - TCP_SERVER_HOST: Your VPS public IP
+# - TCP_SERVER_PORT: 5000
+# - TCP_AUTH_TOKEN: A secret token (must match webapp)
+```
 
----
+### 2. Build and Flash Firmware
 
+```bash
+cd apps/tuya_cloud/object_detection
 
-### Supported Target Platforms
-| Name                  | Support Status | Introduction                                                 | Debug log serial port |
-| --------------------- | -------------- | ------------------------------------------------------------ | --------------------- |
-| Ubuntu                | Supported      | Can be run directly on Linux hosts such as ubuntu.           |                       |
-| Tuya T2                    | Supported      | Supported Module List: [T2-U](https://developer.tuya.com/en/docs/iot/T2-U-module-datasheet?id=Kce1tncb80ldq) | Uart2/115200          |
-| Tuya T3                    | Supported      | Supported Module List: [T3-U](https://developer.tuya.com/en/docs/iot/T3-U-Module-Datasheet?id=Kdd4pzscwf0il) [T3-U-IPEX](https://developer.tuya.com/en/docs/iot/T3-U-IPEX-Module-Datasheet?id=Kdn8r7wgc24pt) [T3-2S](https://developer.tuya.com/en/docs/iot/T3-2S-Module-Datasheet?id=Ke4h1uh9ect1s) [T3-3S](https://developer.tuya.com/en/docs/iot/T3-3S-Module-Datasheet?id=Kdhkyow9fuplc) [T3-E2](https://developer.tuya.com/en/docs/iot/T3-E2-Module-Datasheet?id=Kdirs4kx3uotg) etc. | Uart1/460800          |
-| Tuya T5                  | Supported      | Supported Module List: [T5-E1](https://developer.tuya.com/en/docs/iot/T5-E1-Module-Datasheet?id=Kdar6hf0kzmfi) [T5-E1-IPEX](https://developer.tuya.com/en/docs/iot/T5-E1-IPEX-Module-Datasheet?id=Kdskxvxe835tq) etc. | Uart1/460800          |
-| ESP32/ESP32C3/ESP32S3 | Supported      |                                                              | Uart0/115200          |
-| LN882H                | Supported      |                                                              | Uart1/921600          |
-| BK7231N               | Supported      | Supported Module List:  [CBU](https://developer.tuya.com/en/docs/iot/cbu-module-datasheet?id=Ka07pykl5dk4u)  [CB3S](https://developer.tuya.com/en/docs/iot/cb3s?id=Kai94mec0s076) [CB3L](https://developer.tuya.com/en/docs/iot/cb3l-module-datasheet?id=Kai51ngmrh3qm) [CB3SE](https://developer.tuya.com/en/docs/iot/CB3SE-Module-Datasheet?id=Kanoiluul7nl2) [CB2S](https://developer.tuya.com/en/docs/iot/cb2s-module-datasheet?id=Kafgfsa2aaypq) [CB2L](https://developer.tuya.com/en/docs/iot/cb2l-module-datasheet?id=Kai2eku1m3pyl) [CB1S](https://developer.tuya.com/en/docs/iot/cb1s-module-datasheet?id=Kaij1abmwyjq2) [CBLC5](https://developer.tuya.com/en/docs/iot/cblc5-module-datasheet?id=Ka07iqyusq1wm) [CBLC9](https://developer.tuya.com/en/docs/iot/cblc9-module-datasheet?id=Ka42cqnj9r0i5) [CB8P](https://developer.tuya.com/en/docs/iot/cb8p-module-datasheet?id=Kahvig14r1yk9) etc. | Uart2/115200          |
+# Build the firmware
+python3 ../../../tos.py build
 
-# Documentation
+# Flash to DevKit (select the correct serial port)
+python3 ../../../tos.py flash
 
-For more TuyaOpen-related documentation, please refer to the [TuyaOpen Developer Guide](https://tuyaopen.ai/docs/about-tuyaopen).
+# Monitor the output
+python3 ../../../tos.py monitor -p /dev/ttyACM2
+```
+
+### 3. Deploy Web Application to VPS
+
+```bash
+# SSH to your VPS
+ssh user@your-vps-ip
+
+# Create directory
+mkdir -p ~/tuya-webapp
+
+# Copy webapp files (from your local machine)
+scp -r webapp/* user@your-vps-ip:~/tuya-webapp/
+
+# Create environment file
+cat > ~/tuya-webapp/.env.production << EOF
+AUTH_USERNAME=admin
+AUTH_PASSWORD=your-secure-password
+AUTH_TOKEN=your-secret-token
+HTTP_PORT=3000
+TCP_PORT=5000
+EOF
+
+# Build Docker image
+cd ~/tuya-webapp
+podman build -t tuya-webapp:latest .
+
+# Run the container on the Cloudflare tunnel network
+podman run -d \
+  --name tuya-webapp \
+  --network tunnel-net \
+  --env-file .env.production \
+  -p 3000:3000 \
+  -p 5000:5000 \
+  --restart unless-stopped \
+  tuya-webapp:latest
+```
+
+### 4. Configure Cloudflare Tunnel
+
+1. Go to **Cloudflare Zero Trust Dashboard**
+2. Navigate to **Networks** → **Tunnels**
+3. Select your tunnel
+4. Add a **Public Hostname**:
+   - **Subdomain**: `devkit` (or your choice)
+   - **Domain**: Your domain (e.g., `example.com`)
+   - **Type**: HTTP
+   - **URL**: `tuya-webapp:3000`
+
+5. Access your web UI at `https://devkit.example.com`
+
+## Security
+
+### Authentication Layers
+
+1. **HTTP Basic Auth**: Protects the web UI
+   - Username and password required to access the page
+
+2. **WebSocket Token Auth**: Protects WebSocket commands
+   - Token obtained after HTTP authentication
+   - Required for all WebSocket messages
+
+3. **TCP Token Auth**: Protects DevKit connection
+   - DevKit sends `auth:<token>` on connect
+   - Invalid tokens are rejected
+
+### Important Security Notes
+
+⚠️ **Never commit `.env` files with real credentials**
+
+- Use strong, unique passwords
+- Change default tokens before deployment
+- Keep `.env.production` secure on your VPS
+- The `.env.example` files contain only placeholders
+
+## Available Commands
+
+From the web UI, you can send these commands to the DevKit:
+
+| Command | Description |
+|---------|-------------|
+| `ping` | DevKit responds with `pong` |
+| `status` | Returns JSON with detection state, volume, heap size |
+| `audio play` | Plays the alert audio on speaker |
+| `audio stop` | Stops audio playback |
+| `switch on` | Turns detection on (updates Tuya app) |
+| `switch off` | Turns detection off |
+| `mem` | Returns free heap memory |
+| `reset` | Factory resets the device |
+
+## File Structure
+
+```
+├── webapp/
+│   ├── server.js           # Node.js server (HTTP + WS + TCP)
+│   ├── package.json        # Dependencies
+│   ├── Dockerfile          # Container build
+│   ├── docker-compose.yml  # Optional compose file
+│   ├── .env.example        # Example environment variables
+│   ├── .gitignore          # Ignore node_modules and .env
+│   └── public/
+│       └── index.html      # Web UI
+│
+├── apps/tuya_cloud/object_detection/
+│   ├── src/
+│   │   ├── tuya_main.c     # Main application
+│   │   ├── tcp_client.c    # TCP client for web app
+│   │   └── tcp_client.h    # TCP client header
+│   ├── .env.example        # Example environment variables
+│   ├── .env                # Your configuration (gitignored)
+│   └── CMakeLists.txt      # Build configuration
+```
+
+## Troubleshooting
+
+### DevKit can't connect to VPS
+
+1. Check VPS firewall allows port 5000
+2. Verify `TCP_SERVER_HOST` in `.env` is correct
+3. Ensure DevKit has WiFi connection
+4. Check Tuya app pairing is complete
+
+### WebSocket connection fails
+
+1. Verify Cloudflare tunnel is running
+2. Check the container is on `tunnel-net` network
+3. Ensure HTTP Basic Auth credentials are correct
+
+### Authentication fails
+
+1. Verify `TCP_AUTH_TOKEN` matches in both:
+   - `apps/tuya_cloud/object_detection/.env`
+   - `webapp/.env.production`
+
+### View container logs
+
+```bash
+podman logs tuya-webapp
+```
+
+## Development
+
+### Run webapp locally
+
+```bash
+cd webapp
+npm install
+cp .env.example .env
+# Edit .env with your values
+node server.js
+```
+
+### Rebuild firmware after changes
+
+```bash
+cd apps/tuya_cloud/object_detection
+python3 ../../../tos.py build
+python3 ../../../tos.py flash
+```
 
 ## License
 
-Distributed under the Apache License Version 2.0. For more information, see `LICENSE`.
-
-## Contribute Code
-
-If you are interested in the TuyaOpen and wish to contribute to its development and become a code contributor, please first read the [Contribution Guide](https://tuyaopen.ai/docs/contribute/contribute-guide).
-
-## Disclaimer and Liability Clause
-
-Users should be clearly aware that this project may contain submodules developed by third parties. These submodules may be updated independently of this project. Considering that the frequency of updates for these submodules is uncontrollable, this project cannot guarantee that these submodules are always the latest version. Therefore, if users encounter problems related to submodules when using this project, it is recommended to update them as needed or submit an issue to this project.
-
-If users decide to use this project for commercial purposes, they should fully recognize the potential functional and security risks involved. In this case, users should bear all responsibility for any functional and security issues, perform comprehensive functional and safety tests to ensure that it meets specific business needs. Our company does not accept any liability for direct, indirect, special, incidental, or punitive damages caused by the user's use of this project or its submodules.
-
-## Related Links
-
-- Arduino for TuyaOpen: [https://github.com/tuya/arduino-TuyaOpen](https://github.com/tuya/arduino-TuyaOpen)
-- Luanode for tuyaopen：[https://github.com/tuya/luanode-TuyaOpen](https://github.com/tuya/luanode-TuyaOpen)
+This project uses the TuyaOpen SDK. See the main repository for license details.

@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  tuya-webapp:
+    build: .
+    container_name: tuya-webapp
+    restart: unless-stopped
+    ports:
+      - "3000:3000" # Web UI
+      - "3001:3001" # WebSocket
+      - "5000:5000" # TCP for DevKit
+    environment:
+      - NODE_ENV=production
+    networks:
+      - tuya-net
+  # Optional: Cloudflare Tunnel for exposing services
+  # cloudflared:
+  #   image: cloudflare/cloudflared:latest
+  #   container_name: cloudflared
+  #   restart: unless-stopped
+  #   command: tunnel --no-autoupdate run
+  #   environment:
+  #     - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+  #   networks:
+  #     - tuya-net
+
+networks:
+  tuya-net:
+    driver: bridge

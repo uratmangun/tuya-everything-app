@@ -53,6 +53,17 @@ if(TUYA_OPENSDK_AUTHKEY)
     target_compile_definitions(${EXAMPLE_LIB} PRIVATE TUYA_OPENSDK_AUTHKEY="${TUYA_OPENSDK_AUTHKEY}")
 endif()
 
+# TCP Server configuration for web app communication
+if(TCP_SERVER_HOST)
+    target_compile_definitions(${EXAMPLE_LIB} PRIVATE TCP_SERVER_HOST="${TCP_SERVER_HOST}")
+endif()
+if(TCP_SERVER_PORT)
+    target_compile_definitions(${EXAMPLE_LIB} PRIVATE TCP_SERVER_PORT=${TCP_SERVER_PORT})
+endif()
+if(TCP_AUTH_TOKEN)
+    target_compile_definitions(${EXAMPLE_LIB} PRIVATE TCP_AUTH_TOKEN="${TCP_AUTH_TOKEN}")
+endif()
+
 ########################################
 # Add subdirectory
 ########################################

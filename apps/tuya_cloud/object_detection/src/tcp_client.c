@@ -1,0 +1,302 @@
+/**
+ * @file tcp_client.c
+ * @brief TCP Client implementation for Web App communication
+ * 
+ * Connects to a local server and exchanges messages with the web UI.
+ * Protocol: [LENGTH:4 bytes LE][DATA:N bytes]
+ *
+ * @copyright Copyright (c) 2021-2025 Tuya Inc. All Rights Reserved.
+ */
+
+#include "tcp_client.h"
+#include "tal_api.h"
+#include "tal_network.h"
+#include <string.h>
+
+/***********************************************************
+************************macro define************************
+***********************************************************/
+#define TCP_RECV_BUF_SIZE       2048
+#define TCP_RECONNECT_DELAY_MS  5000
+#define TCP_RECV_TIMEOUT_MS     100
+
+/***********************************************************
+***********************typedef define***********************
+***********************************************************/
+typedef struct {
+    char host[64];
+    uint16_t port;
+    int socket_fd;
+    bool connected;
+    bool running;
+    THREAD_HANDLE thread;
+    MUTEX_HANDLE mutex;
+    tcp_client_recv_cb_t recv_cb;
+    uint8_t recv_buf[TCP_RECV_BUF_SIZE];
+} tcp_client_ctx_t;
+
+/***********************************************************
+***********************variable define**********************
+***********************************************************/
+static tcp_client_ctx_t g_ctx = {0};
+
+/***********************************************************
+***********************function define**********************
+***********************************************************/
+
+/**
+ * @brief Connect to server
+ */
+static OPERATE_RET connect_to_server(void)
+{
+    OPERATE_RET rt = OPRT_OK;
+    
+    /* Create TCP socket */
+    g_ctx.socket_fd = tal_net_socket_create(PROTOCOL_TCP);
+    if (g_ctx.socket_fd < 0) {
+        PR_ERR("Failed to create socket");
+        return OPRT_SOCK_ERR;
+    }
+    
+    /* Set socket timeout */
+    tal_net_set_timeout(g_ctx.socket_fd, TCP_RECV_TIMEOUT_MS, TRANS_RECV);
+    
+    /* Resolve host to IP */
+    TUYA_IP_ADDR_T addr = tal_net_str2addr(g_ctx.host);
+    if (addr == 0) {
+        PR_ERR("Failed to resolve host: %s", g_ctx.host);
+        tal_net_close(g_ctx.socket_fd);
+        g_ctx.socket_fd = -1;
+        return OPRT_SOCK_ERR;
+    }
+    
+    /* Connect to server */
+    rt = tal_net_connect(g_ctx.socket_fd, addr, g_ctx.port);
+    if (rt != OPRT_OK) {
+        PR_ERR("Failed to connect to %s:%d (err: %d)", g_ctx.host, g_ctx.port, rt);
+        tal_net_close(g_ctx.socket_fd);
+        g_ctx.socket_fd = -1;
+        return rt;
+    }
+    
+    g_ctx.connected = true;
+    PR_NOTICE("Connected to server %s:%d", g_ctx.host, g_ctx.port);
+    
+    /* Send authentication message */
+#ifdef TCP_AUTH_TOKEN
+    char auth_msg[128];
+    snprintf(auth_msg, sizeof(auth_msg), "auth:%s", TCP_AUTH_TOKEN);
+    tcp_client_send_str(auth_msg);
+    PR_INFO("Sent authentication token");
+#else
+    tcp_client_send_str("auth:devkit-secret-token");
+    PR_WARN("Using default auth token - please set TCP_AUTH_TOKEN in .env");
+#endif
+    
+    return OPRT_OK;
+}
+
+/**
+ * @brief Disconnect from server
+ */
+static void disconnect_from_server(void)
+{
+    if (g_ctx.socket_fd >= 0) {
+        tal_net_close(g_ctx.socket_fd);
+        g_ctx.socket_fd = -1;
+    }
+    g_ctx.connected = false;
+}
+
+/**
+ * @brief Receiver task
+ */
+static void tcp_receiver_task(void *arg)
+{
+    int recv_len;
+    uint8_t header[4];
+    uint32_t msg_len;
+    
+    PR_INFO("TCP client task started");
+    
+    while (g_ctx.running) {
+        /* Reconnect if disconnected */
+        if (!g_ctx.connected) {
+            PR_INFO("Attempting to connect to %s:%d...", g_ctx.host, g_ctx.port);
+            
+            if (connect_to_server() != OPRT_OK) {
+                tal_system_sleep(TCP_RECONNECT_DELAY_MS);
+                continue;
+            }
+        }
+        
+        /* Try to read message header (4 bytes = length) */
+        recv_len = tal_net_recv(g_ctx.socket_fd, header, 4);
+        
+        if (recv_len < 0) {
+            /* Timeout is normal, just continue */
+            int err = tal_net_get_errno();
+            if (err == UNW_ETIMEDOUT || err == UNW_EAGAIN) {
+                continue;
+            }
+            
+            /* Real error - disconnect and retry */
+            PR_WARN("Recv error (errno: %d), reconnecting...", err);
+            disconnect_from_server();
+            continue;
+        }
+        
+        if (recv_len == 0) {
+            /* Connection closed by server */
+            PR_WARN("Server closed connection, reconnecting...");
+            disconnect_from_server();
+            continue;
+        }
+        
+        if (recv_len < 4) {
+            /* Incomplete header, wait for more data */
+            continue;
+        }
+        
+        /* Parse message length (little-endian) */
+        msg_len = header[0] | (header[1] << 8) | (header[2] << 16) | (header[3] << 24);
+        
+        if (msg_len == 0 || msg_len > TCP_RECV_BUF_SIZE - 1) {
+            PR_WARN("Invalid message length: %u", msg_len);
+            continue;
+        }
+        
+        /* Read message body */
+        recv_len = tal_net_recv(g_ctx.socket_fd, g_ctx.recv_buf, msg_len);
+        
+        if (recv_len <= 0) {
+            PR_WARN("Failed to read message body");
+            disconnect_from_server();
+            continue;
+        }
+        
+        /* Null-terminate for string handling */
+        g_ctx.recv_buf[recv_len] = '\0';
+        
+        PR_INFO("Received from server: %s", g_ctx.recv_buf);
+        
+        /* Call callback */
+        if (g_ctx.recv_cb) {
+            g_ctx.recv_cb((const char *)g_ctx.recv_buf, recv_len);
+        }
+    }
+    
+    disconnect_from_server();
+    PR_INFO("TCP client task stopped");
+}
+
+OPERATE_RET tcp_client_init(const char *host, uint16_t port, tcp_client_recv_cb_t recv_cb)
+{
+    OPERATE_RET rt = OPRT_OK;
+    
+    memset(&g_ctx, 0, sizeof(g_ctx));
+    
+    strncpy(g_ctx.host, host, sizeof(g_ctx.host) - 1);
+    g_ctx.port = port;
+    g_ctx.socket_fd = -1;
+    g_ctx.recv_cb = recv_cb;
+    
+    TUYA_CALL_ERR_RETURN(tal_mutex_create_init(&g_ctx.mutex));
+    (void)rt;  /* Suppress unused variable warning from macro */
+    
+    PR_INFO("TCP client initialized: %s:%d", host, port);
+    
+    return OPRT_OK;
+}
+
+OPERATE_RET tcp_client_start(void)
+{
+    OPERATE_RET rt = OPRT_OK;
+    
+    if (g_ctx.running) {
+        PR_WARN("TCP client already running");
+        return OPRT_OK;
+    }
+    
+    g_ctx.running = true;
+    
+    THREAD_CFG_T cfg = {
+        .stackDepth = 4096,
+        .priority = THREAD_PRIO_3,
+        .thrdname = "tcp_client"
+    };
+    
+    rt = tal_thread_create_and_start(&g_ctx.thread, NULL, NULL,
+                                      tcp_receiver_task, NULL, &cfg);
+    
+    if (rt != OPRT_OK) {
+        PR_ERR("Failed to create TCP client thread: %d", rt);
+        g_ctx.running = false;
+        return rt;
+    }
+    
+    PR_INFO("TCP client started");
+    return OPRT_OK;
+}
+
+void tcp_client_stop(void)
+{
+    g_ctx.running = false;
+    
+    disconnect_from_server();
+    
+    if (g_ctx.thread) {
+        tal_thread_delete(g_ctx.thread);
+        g_ctx.thread = NULL;
+    }
+    
+    PR_INFO("TCP client stopped");
+}
+
+bool tcp_client_is_connected(void)
+{
+    return g_ctx.connected;
+}
+
+OPERATE_RET tcp_client_send(const char *data, uint32_t len)
+{
+    if (!g_ctx.connected || g_ctx.socket_fd < 0) {
+        PR_WARN("Cannot send - not connected");
+        return OPRT_SOCK_ERR;
+    }
+    
+    tal_mutex_lock(g_ctx.mutex);
+    
+    /* Send header (length, little-endian) */
+    uint8_t header[4];
+    header[0] = len & 0xFF;
+    header[1] = (len >> 8) & 0xFF;
+    header[2] = (len >> 16) & 0xFF;
+    header[3] = (len >> 24) & 0xFF;
+    
+    int sent = tal_net_send(g_ctx.socket_fd, header, 4);
+    if (sent != 4) {
+        PR_ERR("Failed to send header");
+        tal_mutex_unlock(g_ctx.mutex);
+        return OPRT_SOCK_ERR;
+    }
+    
+    /* Send data */
+    sent = tal_net_send(g_ctx.socket_fd, (void *)data, len);
+    if (sent != (int)len) {
+        PR_ERR("Failed to send data");
+        tal_mutex_unlock(g_ctx.mutex);
+        return OPRT_SOCK_ERR;
+    }
+    
+    tal_mutex_unlock(g_ctx.mutex);
+    
+    PR_DEBUG("Sent to server: %.*s", len, data);
+    return OPRT_OK;
+}
+
+OPERATE_RET tcp_client_send_str(const char *str)
+{
+    if (!str) return OPRT_INVALID_PARM;
+    return tcp_client_send(str, strlen(str));
+}

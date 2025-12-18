@@ -1,0 +1,752 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>T5AI DevKit Controller</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono&display=swap"
+        rel="stylesheet">
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        :root {
+            --bg-primary: #0a0f1a;
+            --bg-secondary: #111827;
+            --bg-card: rgba(17, 24, 39, 0.8);
+            --border-color: rgba(55, 65, 81, 0.5);
+            --text-primary: #f9fafb;
+            --text-secondary: #9ca3af;
+            --accent-cyan: #06b6d4;
+            --accent-cyan-glow: rgba(6, 182, 212, 0.3);
+            --accent-green: #10b981;
+            --accent-green-glow: rgba(16, 185, 129, 0.3);
+            --accent-red: #ef4444;
+            --accent-red-glow: rgba(239, 68, 68, 0.3);
+            --accent-orange: #f59e0b;
+        }
+
+        body {
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            background: var(--bg-primary);
+            background-image:
+                radial-gradient(ellipse at top, rgba(6, 182, 212, 0.1) 0%, transparent 50%),
+                radial-gradient(ellipse at bottom right, rgba(16, 185, 129, 0.08) 0%, transparent 50%);
+            min-height: 100vh;
+            color: var(--text-primary);
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+
+        header h1 {
+            font-size: 2rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, var(--accent-cyan) 0%, var(--accent-green) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 0.5rem;
+        }
+
+        header p {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.5rem;
+        }
+
+        @media (max-width: 768px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .card {
+            background: var(--bg-card);
+            backdrop-filter: blur(10px);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 1.5rem;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 20px 40px -20px rgba(0, 0, 0, 0.5);
+        }
+
+        .card h2 {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .card h2 span {
+            font-size: 1.2rem;
+        }
+
+        /* Status Card */
+        .status-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 1rem;
+        }
+
+        .status-item {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 12px;
+            padding: 1rem;
+            text-align: center;
+        }
+
+        .status-item label {
+            display: block;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-secondary);
+            margin-bottom: 0.5rem;
+        }
+
+        .status-value {
+            font-size: 1rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        .status-dot.connected {
+            background: var(--accent-green);
+            box-shadow: 0 0 10px var(--accent-green-glow);
+        }
+
+        .status-dot.disconnected {
+            background: var(--accent-red);
+            box-shadow: 0 0 10px var(--accent-red-glow);
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.5;
+            }
+        }
+
+        /* Send Message Card */
+        .input-group {
+            margin-bottom: 1rem;
+        }
+
+        .input-group label {
+            display: block;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            margin-bottom: 0.5rem;
+        }
+
+        textarea,
+        input[type="text"] {
+            width: 100%;
+            padding: 0.875rem 1rem;
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            background: rgba(0, 0, 0, 0.3);
+            color: var(--text-primary);
+            font-family: inherit;
+            font-size: 0.95rem;
+            resize: vertical;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        textarea:focus,
+        input[type="text"]:focus {
+            outline: none;
+            border-color: var(--accent-cyan);
+            box-shadow: 0 0 0 3px var(--accent-cyan-glow);
+        }
+
+        textarea {
+            min-height: 100px;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            padding: 0.875rem 1.5rem;
+            border: none;
+            border-radius: 10px;
+            font-family: inherit;
+            font-size: 0.95rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            width: 100%;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--accent-cyan) 0%, #0891b2 100%);
+            color: white;
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px -10px var(--accent-cyan-glow);
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.1);
+            color: var(--text-primary);
+            border: 1px solid var(--border-color);
+        }
+
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.15);
+        }
+
+        .btn-group {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 0.75rem;
+            margin-top: 1rem;
+        }
+
+        .btn-group .btn {
+            padding: 0.75rem;
+            font-size: 0.85rem;
+        }
+
+        /* Console/Log Card */
+        .console {
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 1rem;
+            height: 300px;
+            overflow-y: auto;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+            line-height: 1.8;
+        }
+
+        .console::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .console::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .console::-webkit-scrollbar-thumb {
+            background: var(--border-color);
+            border-radius: 3px;
+        }
+
+        .log-entry {
+            padding: 0.25rem 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .log-time {
+            color: var(--text-secondary);
+        }
+
+        .log-type {
+            padding: 0.125rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.7rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            margin: 0 0.5rem;
+        }
+
+        .log-type.info {
+            background: rgba(6, 182, 212, 0.2);
+            color: var(--accent-cyan);
+        }
+
+        .log-type.sent {
+            background: rgba(16, 185, 129, 0.2);
+            color: var(--accent-green);
+        }
+
+        .log-type.received {
+            background: rgba(245, 158, 11, 0.2);
+            color: var(--accent-orange);
+        }
+
+        .log-type.error {
+            background: rgba(239, 68, 68, 0.2);
+            color: var(--accent-red);
+        }
+
+        .log-type.status {
+            background: rgba(139, 92, 246, 0.2);
+            color: #a78bfa;
+        }
+
+        .log-message {
+            color: var(--text-primary);
+        }
+
+        /* Quick Commands */
+        .quick-commands {
+            grid-column: span 2;
+        }
+
+        @media (max-width: 768px) {
+            .quick-commands {
+                grid-column: span 1;
+            }
+        }
+
+        .command-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 0.75rem;
+        }
+
+        .command-btn {
+            padding: 1rem;
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            color: var(--text-primary);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: all 0.2s;
+            text-align: center;
+        }
+
+        .command-btn:hover {
+            background: rgba(6, 182, 212, 0.1);
+            border-color: var(--accent-cyan);
+            transform: translateY(-2px);
+        }
+
+        .command-btn .icon {
+            font-size: 1.5rem;
+            margin-bottom: 0.5rem;
+        }
+
+        /* Connection Info */
+        .connection-info {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 12px;
+            padding: 1rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+        }
+
+        .connection-info code {
+            color: var(--accent-cyan);
+            background: rgba(6, 182, 212, 0.1);
+            padding: 0.125rem 0.375rem;
+            border-radius: 4px;
+        }
+
+        .full-width {
+            grid-column: span 2;
+        }
+
+        @media (max-width: 768px) {
+            .full-width {
+                grid-column: span 1;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>🎛️ T5AI DevKit Controller</h1>
+            <p>Real-time communication between Web UI and DevKit</p>
+        </header>
+
+        <div class="grid">
+            <!-- Status Card -->
+            <div class="card">
+                <h2><span>📊</span> Connection Status</h2>
+                <div class="status-grid">
+                    <div class="status-item">
+                        <label>DevKit</label>
+                        <div class="status-value">
+                            <span id="devkit-dot" class="status-dot disconnected"></span>
+                            <span id="devkit-status">Disconnected</span>
+                        </div>
+                    </div>
+                    <div class="status-item">
+                        <label>WebSocket</label>
+                        <div class="status-value">
+                            <span id="ws-dot" class="status-dot disconnected"></span>
+                            <span id="ws-status">Connecting...</span>
+                        </div>
+                    </div>
+                    <div class="status-item">
+                        <label>DevKit IP</label>
+                        <div class="status-value">
+                            <span id="devkit-ip">--</span>
+                        </div>
+                    </div>
+                    <div class="status-item">
+                        <label>Messages</label>
+                        <div class="status-value">
+                            <span id="msg-count">0</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Send Message Card -->
+            <div class="card">
+                <h2><span>📤</span> Send to DevKit</h2>
+                <div class="input-group">
+                    <label for="message">Message</label>
+                    <textarea id="message" placeholder="Enter message to send to DevKit..."></textarea>
+                </div>
+                <button id="send-btn" class="btn btn-primary" onclick="sendMessage()">
+                    <span>📨</span> Send Message
+                </button>
+            </div>
+
+            <!-- Quick Commands -->
+            <div class="card quick-commands">
+                <h2><span>⚡</span> Quick Commands</h2>
+                <div class="command-grid">
+                    <button class="command-btn" onclick="sendQuickCommand('ping')">
+                        <div class="icon">🏓</div>
+                        <div>PING</div>
+                    </button>
+                    <button class="command-btn" onclick="sendQuickCommand('status')">
+                        <div class="icon">📊</div>
+                        <div>STATUS</div>
+                    </button>
+                    <button class="command-btn" onclick="sendQuickCommand('audio play')">
+                        <div class="icon">🔊</div>
+                        <div>PLAY AUDIO</div>
+                    </button>
+                    <button class="command-btn" onclick="sendQuickCommand('audio stop')">
+                        <div class="icon">🔇</div>
+                        <div>STOP AUDIO</div>
+                    </button>
+                    <button class="command-btn" onclick="sendQuickCommand('switch on')">
+                        <div class="icon">💡</div>
+                        <div>SWITCH ON</div>
+                    </button>
+                    <button class="command-btn" onclick="sendQuickCommand('switch off')">
+                        <div class="icon">⚫</div>
+                        <div>SWITCH OFF</div>
+                    </button>
+                    <button class="command-btn" onclick="sendQuickCommand('mem')">
+                        <div class="icon">🧠</div>
+                        <div>MEMORY</div>
+                    </button>
+                    <button class="command-btn" onclick="sendQuickCommand('reset')">
+                        <div class="icon">🔄</div>
+                        <div>RESET</div>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Console Log -->
+            <div class="card full-width">
+                <h2><span>📜</span> Communication Log</h2>
+                <div class="console" id="console">
+                    <div class="log-entry">
+                        <span class="log-time">[--:--:--]</span>
+                        <span class="log-type info">INFO</span>
+                        <span class="log-message">Waiting for WebSocket connection...</span>
+                    </div>
+                </div>
+                <div class="btn-group" style="margin-top: 1rem;">
+                    <button class="btn btn-secondary" onclick="clearLog()">
+                        <span>🗑️</span> Clear Log
+                    </button>
+                    <button class="btn btn-secondary" onclick="reconnect()">
+                        <span>🔄</span> Reconnect
+                    </button>
+                </div>
+            </div>
+
+            <!-- Connection Info -->
+            <div class="card full-width">
+                <h2><span>ℹ️</span> Connection Info</h2>
+                <div class="connection-info">
+                    <p><strong>For DevKit firmware:</strong></p>
+                    <p style="margin-top: 0.5rem;">
+                        Connect to: <code id="server-info">ws://localhost:5000</code>
+                    </p>
+                    <p style="margin-top: 0.5rem; color: var(--text-secondary);">
+                        The DevKit should open a TCP connection to the server on port 5000.
+                        Messages are exchanged using a simple length-prefixed protocol: [LEN:4bytes][DATA:Nbytes]
+                    </p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let msgCount = 0;
+        let authToken = null;
+
+        // WebSocket URL - use same origin, same port (WebSocket is on same port as HTTP)
+        // Automatically use wss:// for HTTPS, ws:// for HTTP
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${wsProtocol}//${window.location.host}`;
+
+        // Fetch auth token from server (since we're already HTTP authenticated)
+        async function getAuthToken() {
+            try {
+                const res = await fetch('/api/token');
+                const data = await res.json();
+                return data.token;
+            } catch (err) {
+                log('error', 'Failed to get auth token');
+                return null;
+            }
+        }
+
+        async function connect() {
+            // Get token first
+            if (!authToken) {
+                log('info', 'Fetching auth token...');
+                authToken = await getAuthToken();
+                if (!authToken) {
+                    log('error', 'Could not get auth token. Please refresh and login.');
+                    return;
+                }
+            }
+
+            log('info', `Connecting to WebSocket: ${wsUrl}`);
+
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                log('info', 'WebSocket connected, authenticating...');
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    handleMessage(data);
+                } catch (err) {
+                    log('error', `Parse error: ${err.message}`);
+                }
+            };
+
+            ws.onclose = () => {
+                log('info', 'WebSocket disconnected');
+                updateWsStatus(false);
+                updateDevKitStatus(false);
+
+                // Auto-reconnect after 3 seconds
+                setTimeout(() => {
+                    if (!ws || ws.readyState === WebSocket.CLOSED) {
+                        connect();
+                    }
+                }, 3000);
+            };
+
+            ws.onerror = (err) => {
+                log('error', 'WebSocket error');
+            };
+        }
+
+        function handleMessage(data) {
+            switch (data.type) {
+                case 'auth_required':
+                    // Send authentication token
+                    log('info', 'Sending authentication...');
+                    ws.send(JSON.stringify({
+                        type: 'auth',
+                        token: authToken
+                    }));
+                    break;
+
+                case 'auth_success':
+                    log('info', '✓ Authenticated successfully');
+                    updateWsStatus(true);
+                    if (data.devkit) {
+                        updateDevKitStatus(data.devkit.connected);
+                    }
+                    if (data.serverIP) {
+                        document.getElementById('server-info').textContent =
+                            `${data.serverIP}:${data.tcpPort}`;
+                    }
+                    break;
+
+                case 'auth_failed':
+                    log('error', 'Authentication failed - invalid token');
+                    updateWsStatus(false);
+                    break;
+
+                case 'devkit_status':
+                    updateDevKitStatus(data.connected, data.address);
+                    if (data.serverIP) {
+                        document.getElementById('server-info').textContent =
+                            `${data.serverIP}:${data.tcpPort}`;
+                    }
+                    log('status', data.connected ?
+                        `DevKit connected from ${data.address}` :
+                        'DevKit disconnected');
+                    break;
+
+                case 'devkit_message':
+                    log('received', data.data);
+                    msgCount++;
+                    document.getElementById('msg-count').textContent = msgCount;
+                    break;
+
+                case 'sent_to_devkit':
+                    log('sent', data.data);
+                    break;
+
+                case 'error':
+                    log('error', data.message);
+                    break;
+            }
+        }
+
+        function sendMessage() {
+            const input = document.getElementById('message');
+            const message = input.value.trim();
+
+            if (!message) return;
+
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                log('error', 'WebSocket not connected');
+                return;
+            }
+
+            ws.send(JSON.stringify({
+                type: 'send_to_devkit',
+                data: message
+            }));
+
+            input.value = '';
+        }
+
+        function sendQuickCommand(cmd) {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                log('error', 'WebSocket not connected');
+                return;
+            }
+
+            ws.send(JSON.stringify({
+                type: 'send_to_devkit',
+                data: cmd
+            }));
+        }
+
+        function updateWsStatus(connected) {
+            const dot = document.getElementById('ws-dot');
+            const status = document.getElementById('ws-status');
+
+            dot.className = 'status-dot ' + (connected ? 'connected' : 'disconnected');
+            status.textContent = connected ? 'Authenticated' : 'Disconnected';
+        }
+
+        function updateDevKitStatus(connected, address) {
+            const dot = document.getElementById('devkit-dot');
+            const status = document.getElementById('devkit-status');
+            const ipEl = document.getElementById('devkit-ip');
+
+            dot.className = 'status-dot ' + (connected ? 'connected' : 'disconnected');
+            status.textContent = connected ? 'Connected' : 'Disconnected';
+            ipEl.textContent = address || '--';
+        }
+
+        function log(type, message) {
+            const console = document.getElementById('console');
+            const time = new Date().toLocaleTimeString();
+
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            entry.innerHTML = `
+                <span class="log-time">[${time}]</span>
+                <span class="log-type ${type}">${type.toUpperCase()}</span>
+                <span class="log-message">${escapeHtml(message)}</span>
+            `;
+
+            console.appendChild(entry);
+            console.scrollTop = console.scrollHeight;
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function clearLog() {
+            document.getElementById('console').innerHTML = '';
+            log('info', 'Log cleared');
+        }
+
+        function reconnect() {
+            if (ws) {
+                ws.close();
+            }
+            setTimeout(connect, 500);
+        }
+
+        // Handle Enter key in textarea
+        document.getElementById('message').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+
+        // Initial connection
+        connect();
+    </script>
+</body>
+
+</html>

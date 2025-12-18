@@ -45,12 +45,23 @@
 #include "alert_audio_data.h"
 #include "tdl_audio_manage.h"
 
+/* TCP client for web app communication */
+#include "tcp_client.h"
+
 /* Switch DP ID - typically DP 1 for switch products */
 #define SWITCH_DP_ID         1
 /* Volume DP ID - DP 3 for volume control */
 #define VOLUME_DP_ID         3
 /* Default volume level (0-100) */
 #define DEFAULT_VOLUME       70
+
+/* TCP Server defaults (can be overridden via .env) */
+#ifndef TCP_SERVER_HOST
+#define TCP_SERVER_HOST "192.168.18.10"
+#endif
+#ifndef TCP_SERVER_PORT
+#define TCP_SERVER_PORT 5000
+#endif
 
 /* Current detection state */
 static bool g_detection_active = false;
@@ -79,6 +90,76 @@ tuya_iot_client_t client;
 
 /* Tuya license information (uuid authkey) */
 tuya_iot_license_t license;
+
+/**
+ * @brief Callback for messages received from web app via TCP
+ */
+static void tcp_message_callback(const char *data, uint32_t len)
+{
+    PR_INFO("Web App Command: %.*s", len, data);
+    
+    char response[256];
+    
+    /* Handle different commands from web app */
+    if (strncmp(data, "ping", 4) == 0) {
+        tcp_client_send_str("pong");
+    }
+    else if (strncmp(data, "status", 6) == 0) {
+        snprintf(response, sizeof(response), 
+            "{\"detection\":%s,\"volume\":%d,\"audio_init\":%s,\"heap\":%d}",
+            g_detection_active ? "true" : "false",
+            g_current_volume,
+            g_audio_initialized ? "true" : "false",
+            tal_system_get_free_heap_size());
+        tcp_client_send_str(response);
+    }
+    else if (strncmp(data, "audio play", 10) == 0) {
+        if (g_audio_initialized && g_current_volume > 0) {
+            PR_INFO("Web App triggered audio play");
+            if (ai_audio_player_is_playing()) {
+                ai_audio_player_stop();
+            }
+            ai_audio_player_start("webapp_audio");
+            ai_audio_player_data_write("webapp_audio", 
+                                       (uint8_t *)alert_audio_data, 
+                                       sizeof(alert_audio_data), 1);
+            tcp_client_send_str("ok:audio_playing");
+        } else {
+            tcp_client_send_str("error:audio_not_ready");
+        }
+    }
+    else if (strncmp(data, "audio stop", 10) == 0) {
+        if (ai_audio_player_is_playing()) {
+            ai_audio_player_stop();
+        }
+        tcp_client_send_str("ok:audio_stopped");
+    }
+    else if (strncmp(data, "switch on", 9) == 0) {
+        g_detection_active = true;
+        /* Report to Tuya cloud */
+        dp_obj_t dp = {.id = SWITCH_DP_ID, .type = PROP_BOOL, .value.dp_bool = true};
+        tuya_iot_dp_obj_report(&client, NULL, &dp, 1, 0);
+        tcp_client_send_str("ok:switch_on");
+    }
+    else if (strncmp(data, "switch off", 10) == 0) {
+        g_detection_active = false;
+        dp_obj_t dp = {.id = SWITCH_DP_ID, .type = PROP_BOOL, .value.dp_bool = false};
+        tuya_iot_dp_obj_report(&client, NULL, &dp, 1, 0);
+        tcp_client_send_str("ok:switch_off");
+    }
+    else if (strncmp(data, "mem", 3) == 0) {
+        snprintf(response, sizeof(response), "heap:%d", tal_system_get_free_heap_size());
+        tcp_client_send_str(response);
+    }
+    else if (strncmp(data, "reset", 5) == 0) {
+        tcp_client_send_str("ok:resetting");
+        tuya_iot_reset(tuya_iot_client_get());
+    }
+    else {
+        snprintf(response, sizeof(response), "unknown_command:%.*s", len > 50 ? 50 : (int)len, data);
+        tcp_client_send_str(response);
+    }
+}
 
 /**
  * @brief Update speaker GPIO based on current volume
@@ -531,6 +612,20 @@ void user_main(void)
     tuya_iot_start(&client);
 
     reset_netconfig_check();
+
+    /* Initialize TCP client for web app communication */
+    PR_NOTICE("============================================");
+    PR_NOTICE("     WEB APP CONNECTION");
+    PR_NOTICE("============================================");
+    PR_NOTICE("TCP Server: %s:%d", TCP_SERVER_HOST, TCP_SERVER_PORT);
+    PR_NOTICE("============================================");
+    
+    if (tcp_client_init(TCP_SERVER_HOST, TCP_SERVER_PORT, tcp_message_callback) == OPRT_OK) {
+        tcp_client_start();
+        PR_INFO("TCP client started - will connect to web app server");
+    } else {
+        PR_ERR("Failed to initialize TCP client");
+    }
 
     for (;;) {
         /* Loop to receive packets, and handles client keepalive */
