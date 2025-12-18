@@ -1,5 +1,7 @@
 # Project Plan for T5AI-Based AI Smart Doorbell System
 
+![Smart Doorbell Hero Image](./smart_doorbell_hero.png)
+
 ## I. Project Overview
 
 ### 1.1 Project Background
