@@ -491,6 +491,30 @@
                         <h2>TCP Server Settings</h2>
                     </div>
 
+                    <!-- TCP Connection Status -->
+                    <div class="status-item"
+                        style="margin-bottom: 16px; padding: 12px; background: rgba(255,255,255,0.05); border-radius: 8px;">
+                        <span class="status-label">Connection Status</span>
+                        <span class="status-value" id="tcpStatusDisplay">
+                            <span id="tcpStatusIcon">⚫</span>
+                            <span id="tcpStatusText">Unknown</span>
+                        </span>
+                    </div>
+
+                    <!-- TCP Control Buttons -->
+                    <div style="display: flex; gap: 8px; margin-bottom: 16px;">
+                        <button class="btn btn-success" onclick="connectTcp()" id="connectTcpBtn"
+                            style="flex: 1; background: #28a745;">
+                            <span>🔌</span> Connect TCP
+                        </button>
+                        <button class="btn btn-danger" onclick="disconnectTcp()" id="disconnectTcpBtn"
+                            style="flex: 1; background: #dc3545;">
+                            <span>🔌</span> Disconnect TCP
+                        </button>
+                    </div>
+
+                    <div class="section-divider"></div>
+
                     <div class="form-group">
                         <label>Server Host</label>
                         <input type="text" id="tcpHost" placeholder="e.g., 192.168.1.100 or example.com">
@@ -522,7 +546,8 @@
                         <button class="btn btn-secondary" onclick="scanWifi()" id="scanWifiBtn" style="flex: 1;">
                             <span>🔍</span> Scan WiFi
                         </button>
-                        <button class="btn btn-secondary" onclick="disconnectWifi()" id="disconnectWifiBtn" style="flex: 1; background: #dc3545;">
+                        <button class="btn btn-secondary" onclick="disconnectWifi()" id="disconnectWifiBtn"
+                            style="flex: 1; background: #dc3545;">
                             <span>📴</span> Disconnect WiFi
                         </button>
                     </div>
@@ -586,21 +611,23 @@
 
                     <div class="section-divider"></div>
 
-                    <h3 style="margin-bottom: 8px;">📡 BLE Log</h3>
-                    <div id="bleLog" style="background: #1a1a2e; border-radius: 8px; padding: 12px; max-height: 200px; overflow-y: auto; font-family: monospace; font-size: 12px; color: #0f0;">
-                        <div>Waiting for BLE data...</div>
-                    </div>
-                    <button class="btn btn-secondary" onclick="clearBleLog()" style="margin-top: 8px;">
-                        <span>🗑️</span> Clear Log
-                    </button>
-
-                    <div class="section-divider"></div>
-
                     <button class="btn btn-danger" onclick="rebootDevice()">
                         <span>🔄</span> Reboot Device
                     </button>
                 </div>
             </div>
+        </div>
+
+        <!-- BLE Log Card (always visible when connected) -->
+        <div id="bleLogCard" class="card" style="margin-top: 16px;">
+            <h3 style="margin-bottom: 8px;">📡 BLE Log</h3>
+            <div id="bleLog"
+                style="background: #1a1a2e; border-radius: 8px; padding: 12px; max-height: 200px; overflow-y: auto; font-family: monospace; font-size: 12px; color: #0f0;">
+                <div>Waiting for BLE data...</div>
+            </div>
+            <button class="btn btn-secondary" onclick="clearBleLog()" style="margin-top: 8px;">
+                <span>🗑️</span> Clear Log
+            </button>
         </div>
 
         <div class="footer">
@@ -1090,7 +1117,32 @@
 
             const hexStr = Array.from(data).map(b => b.toString(16).padStart(2, '0')).join(' ');
             console.log('Received raw:', hexStr);
-            addBleLog(`RX (${data.length} bytes): ${hexStr.substring(0, 60)}...`, 'recv');
+            addBleLog(`RX (${data.length} bytes): ${hexStr.substring(0, 60)}${data.length > 30 ? '...' : ''}`, 'recv');
+
+            // Check if this looks like plain JSON (DevKit config response format)
+            // DevKit sends: [0x00, 0x00, 0x00, 0x00] + JSON  (4-byte header + JSON)
+            // Or possibly raw JSON starting with '{'
+            let isPlainResponse = false;
+
+            // Check for 4-byte header + JSON pattern
+            if (data.length > 5 && data[0] === 0x00 && data[1] === 0x00 && data[2] === 0x00) {
+                // Check if byte 5 (first byte after header) is '{' (0x7B)
+                if (data[4] === 0x7B) {
+                    console.log('Detected plain JSON with 4-byte header');
+                    isPlainResponse = true;
+                }
+            }
+
+            // Check for raw JSON starting with '{'
+            if (!isPlainResponse && data.length > 1 && data[0] === 0x7B) {
+                console.log('Detected raw JSON');
+                isPlainResponse = true;
+            }
+
+            if (isPlainResponse) {
+                handlePlainResponse(data);
+                return;
+            }
 
             // If we have crypto, try to decrypt
             if (tuyaCrypto && data.length > 17) {
@@ -1150,13 +1202,34 @@
         }
 
         function handlePlainResponse(data) {
-            const text = new TextDecoder().decode(data);
+            // Check if data has 4-byte header (flags + channel) from DevKit
+            // Format: [0x00, 0x00, 0x00, channel] + JSON
+            let jsonData = data;
+
+            if (data.length > 4) {
+                // Check if first 3 bytes are zeros (header signature)
+                if (data[0] === 0x00 && data[1] === 0x00 && data[2] === 0x00) {
+                    console.log('Detected 4-byte header, channel:', data[3]);
+                    addBleLog(`Header detected: channel=${data[3]}`, 'info');
+                    jsonData = data.slice(4);  // Skip the 4-byte header
+                }
+            }
+
+            const text = new TextDecoder().decode(jsonData);
             console.log('Received text:', text);
+            addBleLog(`Parsed: ${text.substring(0, 100)}${text.length > 100 ? '...' : ''}`, 'recv');
 
             try {
                 const response = JSON.parse(text);
                 handleResponse(response);
+
+                // If it's a wifi_list, also show a toast
+                if (response.type === 'wifi_list') {
+                    const count = response.networks ? response.networks.length : 0;
+                    showToast('📶', `Found ${count} WiFi networks`, 'success');
+                }
             } catch (e) {
+                console.log('JSON parse failed:', e.message);
                 handleTextResponse(text);
             }
         }
@@ -1185,14 +1258,17 @@
                 console.log('DP Status report');
                 parseDPData(payload);
             }
-            // FRM_DOWNLINK_TRANSPARENT response
+            // FRM_DOWNLINK_TRANSPARENT response (0x801B) or FRM_UPLINK_TRANSPARENT response (0x801C)
             else if (cmdType === 0x801B || cmdType === 0x801C) {
                 console.log('Transparent data response, payload length:', payload.length);
+                addBleLog(`Transparent data CMD=0x${cmdType.toString(16)}, len=${payload.length}`, 'info');
+
                 try {
                     // Format: flags(2) + channel(2) + json_data
                     // Skip 4 bytes header
                     const jsonStr = new TextDecoder().decode(payload.slice(4));
                     console.log('JSON string:', jsonStr);
+                    addBleLog(`JSON: ${jsonStr.substring(0, 80)}${jsonStr.length > 80 ? '...' : ''}`, 'recv');
                     const response = JSON.parse(jsonStr);
                     handleResponse(response);
                 } catch (e) {
@@ -1200,15 +1276,18 @@
                     // Try without header skip (legacy format)
                     try {
                         const jsonStr = new TextDecoder().decode(payload);
+                        addBleLog(`Legacy JSON: ${jsonStr.substring(0, 80)}`, 'warn');
                         const response = JSON.parse(jsonStr);
                         handleResponse(response);
                     } catch (e2) {
                         console.log('Also failed legacy parse:', e2);
+                        addBleLog('Failed to parse transparent data', 'error');
                     }
                 }
             }
             else {
-                console.log('Unknown command type:', cmdType);
+                console.log('Unknown command type:', cmdType.toString(16));
+                addBleLog(`Unknown CMD: 0x${cmdType.toString(16)}`, 'warn');
             }
         }
 
@@ -1219,15 +1298,20 @@
 
         function handleResponse(response) {
             console.log('Parsed response:', response);
+            addBleLog(`Response type: ${response.type}`, 'info');
 
             if (response.type === 'status') {
                 updateStatusDisplay(response);
             } else if (response.type === 'wifi_list') {
+                const count = response.networks ? response.networks.length : 0;
+                addBleLog(`WiFi list received: ${count} networks`, 'recv');
                 displayWifiList(response.networks || []);
+                showToast('📶', `Found ${count} WiFi networks`, 'success');
             } else if (response.type === 'ack') {
-                showToast('✅', response.message || 'Command successful', 'success');
+                showToast('✅', response.msg || response.message || 'Command successful', 'success');
             } else if (response.type === 'error') {
-                showToast('❌', response.message || 'Command failed', 'error');
+                addBleLog(`Error: ${response.msg || response.message}`, 'error');
+                showToast('❌', response.msg || response.message || 'Command failed', 'error');
             }
         }
 
@@ -1300,8 +1384,13 @@
         async function sendCommand(cmd) {
             if (!writeCharacteristic) {
                 showToast('❌', 'Not connected to device', 'error');
+                addBleLog('TX failed: Not connected', 'error');
                 return false;
             }
+
+            // Log the command being sent
+            const cmdStr = JSON.stringify(cmd);
+            addBleLog(`TX CMD: ${cmdStr}`, 'info');
 
             // If we have Tuya crypto, use transparent data channel
             if (tuyaCrypto) {
@@ -1310,28 +1399,32 @@
                     // Channel 1 = BLE_CHANNLE_NETCFG (for WiFi config)
                     // Channel 0 = Custom config channel (for TCP settings, status, etc.)
                     let channelType = 0;  // Default to custom channel
-                    
+                    let cmdToSend = cmd;
+
                     if (cmd.cmd === 'set_wifi' && cmd.ssid) {
                         // Use NETCFG channel for WiFi - format: {ssid, pwd, token}
                         channelType = 1;  // BLE_CHANNLE_NETCFG
-                        cmd = {
+                        cmdToSend = {
                             ssid: cmd.ssid,
                             pwd: cmd.password || '',
                             token: 'webble'  // Required by netcfg handler
                         };
                     }
-                    
-                    const packet = tuyaCrypto.createTransparentDataCmd(channelType, cmd);
+
+                    const packet = tuyaCrypto.createTransparentDataCmd(channelType, cmdToSend);
                     // Use mode 0 (unencrypted) since we haven't completed handshake yet
                     const withMode = await tuyaCrypto.encryptPacket(packet, 0);
                     const framed = tuyaCrypto.encodeForTransmission(withMode);
 
-                    console.log(`Sending via Tuya protocol (channel ${channelType}, mode 0):`, 
+                    console.log(`Sending via Tuya protocol (channel ${channelType}, mode 0):`,
                         Array.from(framed).map(b => b.toString(16).padStart(2, '0')).join(' '));
+                    addBleLog(`TX (${framed.length} bytes) ch=${channelType}`, 'info');
+
                     await writeCharacteristic.writeValue(framed);
                     return true;
                 } catch (error) {
                     console.error('Tuya send failed:', error);
+                    addBleLog(`TX error: ${error.message}`, 'error');
                 }
             }
 
@@ -1341,9 +1434,11 @@
                 const data = encoder.encode(JSON.stringify(cmd));
                 await writeCharacteristic.writeValue(data);
                 console.log('Sent:', cmd);
+                addBleLog(`TX plain (${data.length} bytes)`, 'info');
                 return true;
             } catch (error) {
                 console.error('Send error:', error);
+                addBleLog(`TX error: ${error.message}`, 'error');
                 showToast('❌', 'Failed to send command', 'error');
                 return false;
             }
@@ -1387,15 +1482,30 @@
         }
 
         async function disconnectWifi() {
+            if (!confirm('This will disconnect WiFi, stop TCP, and CLEAR saved WiFi credentials.\\n\\nYou will need to reconfigure WiFi via BLE after this.\\n\\nContinue?')) {
+                return;
+            }
+
             const btn = document.getElementById('disconnectWifiBtn');
             btn.disabled = true;
             btn.innerHTML = '<div class="spinner"></div> Disconnecting...';
 
+            // First disconnect TCP to prevent crashes when WiFi goes down
+            addBleLog('Disconnecting TCP first...', 'info');
+            await sendCommand({ cmd: 'tcp_disconnect' });
+
+            // Wait a moment for TCP to close cleanly
+            await new Promise(resolve => setTimeout(resolve, 500));
+
+            // Now disconnect WiFi
+            addBleLog('Disconnecting WiFi...', 'info');
             await sendCommand({ cmd: 'wifi_disconnect' });
 
             setTimeout(() => {
                 btn.disabled = false;
                 btn.innerHTML = '<span>📴</span> Disconnect WiFi';
+                // Refresh status to show updated state
+                refreshStatus();
             }, 2000);
         }
 
@@ -1463,6 +1573,21 @@
             document.getElementById('tcpServerStatus').textContent = data.tcp_connected ? '✅ Connected' : '❌ Disconnected';
             document.getElementById('freeHeap').textContent = data.heap ? `${data.heap} bytes` : '--';
 
+            // Update TCP status display in TCP tab
+            const tcpStatusIcon = document.getElementById('tcpStatusIcon');
+            const tcpStatusText = document.getElementById('tcpStatusText');
+            if (tcpStatusIcon && tcpStatusText) {
+                if (data.tcp_connected) {
+                    tcpStatusIcon.textContent = '🟢';
+                    tcpStatusText.textContent = 'Connected';
+                    tcpStatusText.style.color = '#28a745';
+                } else {
+                    tcpStatusIcon.textContent = '🔴';
+                    tcpStatusText.textContent = 'Disconnected';
+                    tcpStatusText.style.color = '#dc3545';
+                }
+            }
+
             // Update TCP settings if available
             if (data.tcp_host) {
                 document.getElementById('tcpHost').value = data.tcp_host;
@@ -1470,6 +1595,40 @@
             if (data.tcp_port) {
                 document.getElementById('tcpPort').value = data.tcp_port;
             }
+        }
+
+        async function connectTcp() {
+            const btn = document.getElementById('connectTcpBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<div class="spinner"></div> Connecting...';
+
+            await sendCommand({ cmd: 'tcp_connect' });
+
+            setTimeout(() => {
+                btn.disabled = false;
+                btn.innerHTML = '<span>🔌</span> Connect TCP';
+                // Refresh status after a delay to see updated connection state
+                refreshStatus();
+            }, 2000);
+        }
+
+        async function disconnectTcp() {
+            const btn = document.getElementById('disconnectTcpBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<div class="spinner"></div> Disconnecting...';
+
+            await sendCommand({ cmd: 'tcp_disconnect' });
+
+            setTimeout(() => {
+                btn.disabled = false;
+                btn.innerHTML = '<span>🔌</span> Disconnect TCP';
+                // Refresh status after a delay
+                refreshStatus();
+            }, 1000);
+        }
+
+        async function refreshStatus() {
+            await sendCommand({ cmd: 'get_status' });
         }
 
         async function rebootDevice() {

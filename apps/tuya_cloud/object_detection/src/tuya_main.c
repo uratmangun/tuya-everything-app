@@ -653,17 +653,9 @@ void user_main(void)
     } else {
         PR_ERR("Failed to initialize TCP client");
     }
-
-    /* Initialize RTSP tunnel if enabled */
-    PR_NOTICE("============================================");
-    PR_NOTICE("     RTSP TUNNEL CONFIGURATION");
-    PR_NOTICE("============================================");
-    PR_NOTICE("Camera: %s:%d", RTSP_CAMERA_HOST, RTSP_CAMERA_PORT);
-    PR_NOTICE("VPS:    %s:%d", RTSP_VPS_HOST, RTSP_VPS_PORT);
-    PR_NOTICE("Auto-start: %s", RTSP_TUNNEL_ENABLED ? "YES" : "NO (send 'rtsp start' via web app)");
-    PR_NOTICE("============================================");
-
+    /* Note: RTSP tunnel feature disabled - see plan/TTS_STREAMING_PLAN.md for audio streaming */
 #if RTSP_TUNNEL_ENABLED
+    /* RTSP tunnel auto-start if enabled at compile time */
     {
         rtsp_tunnel_config_t cfg = {0};
         strncpy(cfg.camera_host, RTSP_CAMERA_HOST, sizeof(cfg.camera_host) - 1);

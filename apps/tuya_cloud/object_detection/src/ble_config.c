@@ -27,6 +27,9 @@
 #include "ble_mgr.h"
 #include "ble_protocol.h"
 
+/* TCP client for connection status */
+#include "tcp_client.h"
+
 /***********************************************************
  * WiFi Direct Connection
  ***********************************************************/
@@ -159,20 +162,89 @@ static void ble_config_channel_handler(void *data, void *user_data)
     }
     /* Handle get_status command */
     else if (strcmp(cmd->valuestring, "get_status") == 0) {
-        int heap = tal_system_get_free_heap_size();
+        PR_NOTICE("BLE config: Status requested");
+        
+        /* Get WiFi status */
+        WF_STATION_STAT_E wifi_stat = WSS_IDLE;
+        tal_wifi_station_get_status(&wifi_stat);
+        bool wifi_connected = (wifi_stat == WSS_GOT_IP);
+        
+        /* Get TCP status */
+        bool tcp_connected = tcp_client_is_connected();
         
         /* Build status JSON response */
         cJSON *status = cJSON_CreateObject();
         cJSON_AddStringToObject(status, "type", "status");
-        cJSON_AddNumberToObject(status, "heap", heap);
+        cJSON_AddBoolToObject(status, "wifi_connected", wifi_connected);
+        cJSON_AddBoolToObject(status, "tcp_connected", tcp_connected);
+        cJSON_AddNumberToObject(status, "heap", tal_system_get_free_heap_size());
         
         char *status_str = cJSON_PrintUnformatted(status);
         if (status_str) {
             PR_NOTICE("BLE config: Status - %s", status_str);
-            /* Would send via BLE notify here */
+            /* Send via BLE */
+            size_t json_len = strlen(status_str);
+            uint8_t *resp = tal_malloc(4 + json_len);
+            if (resp) {
+                resp[0] = 0x00; resp[1] = 0x00; resp[2] = 0x00; resp[3] = BLE_CHANNEL_CONFIG;
+                memcpy(resp + 4, status_str, json_len);
+                tuya_ble_send(FRM_UPLINK_TRANSPARENT_REQ, 0, resp, 4 + json_len);
+                tal_free(resp);
+            }
             tal_free(status_str);
         }
         cJSON_Delete(status);
+    }
+    /* Handle tcp_connect command */
+    else if (strcmp(cmd->valuestring, "tcp_connect") == 0) {
+        PR_NOTICE("BLE config: TCP connect requested");
+        
+        /* Check if WiFi is connected first */
+        WF_STATION_STAT_E wifi_stat = WSS_IDLE;
+        tal_wifi_station_get_status(&wifi_stat);
+        
+        if (wifi_stat != WSS_GOT_IP) {
+            const char *err_json = "{\"type\":\"error\",\"msg\":\"WiFi not connected\"}";
+            size_t err_len = strlen(err_json);
+            uint8_t *resp = tal_malloc(4 + err_len);
+            if (resp) {
+                resp[0] = 0x00; resp[1] = 0x00; resp[2] = 0x00; resp[3] = BLE_CHANNEL_CONFIG;
+                memcpy(resp + 4, err_json, err_len);
+                tuya_ble_send(FRM_UPLINK_TRANSPARENT_REQ, 0, resp, 4 + err_len);
+                tal_free(resp);
+            }
+        } else {
+            /* Start TCP client */
+            extern OPERATE_RET tcp_client_start(void);
+            tcp_client_start();
+            
+            const char *ack_json = "{\"type\":\"ack\",\"msg\":\"TCP connecting...\"}";
+            size_t ack_len = strlen(ack_json);
+            uint8_t *resp = tal_malloc(4 + ack_len);
+            if (resp) {
+                resp[0] = 0x00; resp[1] = 0x00; resp[2] = 0x00; resp[3] = BLE_CHANNEL_CONFIG;
+                memcpy(resp + 4, ack_json, ack_len);
+                tuya_ble_send(FRM_UPLINK_TRANSPARENT_REQ, 0, resp, 4 + ack_len);
+                tal_free(resp);
+            }
+        }
+    }
+    /* Handle tcp_disconnect command */
+    else if (strcmp(cmd->valuestring, "tcp_disconnect") == 0) {
+        PR_NOTICE("BLE config: TCP disconnect requested");
+        
+        extern void tcp_client_stop(void);
+        tcp_client_stop();
+        
+        const char *ack_json = "{\"type\":\"ack\",\"msg\":\"TCP disconnected\"}";
+        size_t ack_len = strlen(ack_json);
+        uint8_t *resp = tal_malloc(4 + ack_len);
+        if (resp) {
+            resp[0] = 0x00; resp[1] = 0x00; resp[2] = 0x00; resp[3] = BLE_CHANNEL_CONFIG;
+            memcpy(resp + 4, ack_json, ack_len);
+            tuya_ble_send(FRM_UPLINK_TRANSPARENT_REQ, 0, resp, 4 + ack_len);
+            tal_free(resp);
+        }
     }
     /* Handle wifi_scan command */
     else if (strcmp(cmd->valuestring, "wifi_scan") == 0) {
@@ -210,25 +282,51 @@ static void ble_config_channel_handler(void *data, void *user_data)
             cJSON_AddStringToObject(resp_json, "type", "wifi_list");
             cJSON *networks = cJSON_CreateArray();
             
-            /* Limit to 10 networks to fit in BLE packet */
-            uint32_t max_networks = (ap_count > 10) ? 10 : ap_count;
-            for (uint32_t i = 0; i < max_networks; i++) {
+            /* Limit to 5 networks to fit in BLE MTU (256 bytes)
+             * Each network entry is ~40-50 bytes, so 5 networks = ~200-250 bytes
+             * Plus JSON wrapper = ~240 bytes max
+             */
+            uint32_t max_networks = (ap_count > 5) ? 5 : ap_count;
+            uint32_t added = 0;
+            for (uint32_t i = 0; i < ap_count && added < max_networks; i++) {
                 if (strlen((char*)ap_info[i].ssid) > 0) {  /* Skip hidden networks */
                     cJSON *net = cJSON_CreateObject();
                     cJSON_AddStringToObject(net, "ssid", (char*)ap_info[i].ssid);
                     cJSON_AddNumberToObject(net, "rssi", ap_info[i].rssi);
                     cJSON_AddNumberToObject(net, "ch", ap_info[i].channel);
                     cJSON_AddItemToArray(networks, net);
+                    added++;
                 }
             }
             cJSON_AddItemToObject(resp_json, "networks", networks);
             
             char *json_str = cJSON_PrintUnformatted(resp_json);
             if (json_str) {
-                PR_NOTICE("Sending WiFi list via BLE: %d bytes", strlen(json_str));
+                size_t json_len = strlen(json_str);
+                PR_NOTICE("Sending WiFi list via BLE: %d bytes (%d networks)", json_len, added);
+                
+                /* Check if response fits in BLE MTU (leave room for header) */
+                if (json_len + 4 > 240) {
+                    PR_WARN("WiFi list too large (%d bytes), truncating", json_len);
+                    tal_free(json_str);
+                    cJSON_Delete(resp_json);
+                    
+                    /* Send truncated error response */
+                    const char *err_json = "{\"type\":\"wifi_list\",\"networks\":[],\"msg\":\"Too many networks\"}";
+                    size_t err_len = strlen(err_json);
+                    uint8_t *resp = tal_malloc(4 + err_len);
+                    if (resp) {
+                        resp[0] = 0x00; resp[1] = 0x00; resp[2] = 0x00; resp[3] = BLE_CHANNEL_CONFIG;
+                        memcpy(resp + 4, err_json, err_len);
+                        tuya_ble_send(FRM_UPLINK_TRANSPARENT_REQ, 0, resp, 4 + err_len);
+                        tal_free(resp);
+                    }
+                    tal_wifi_release_ap(ap_info);
+                    cJSON_Delete(root);
+                    return;
+                }
                 
                 /* Send via BLE transparent channel */
-                size_t json_len = strlen(json_str);
                 uint8_t *resp = tal_malloc(4 + json_len);
                 if (resp) {
                     resp[0] = 0x00;  /* flags low */
@@ -251,11 +349,33 @@ static void ble_config_channel_handler(void *data, void *user_data)
     else if (strcmp(cmd->valuestring, "wifi_disconnect") == 0) {
         PR_NOTICE("BLE config: WiFi disconnect requested");
         
-        /* Use netmgr to properly close connection and stop auto-reconnect */
-        extern OPERATE_RET netmgr_conn_set(int type, int cmd, void *param);
-        netmgr_conn_set(1, 6, NULL);  /* NETCONN_WIFI=1, NETCONN_CMD_CLOSE=6 */
+        /* First stop TCP client to prevent crashes when WiFi goes down */
+        extern void tcp_client_stop(void);
+        PR_DEBUG("Stopping TCP client before WiFi disconnect");
+        tcp_client_stop();
         
-        const char *ack_json = "{\"type\":\"ack\",\"msg\":\"WiFi disconnected\"}";
+        /* Small delay to let TCP close cleanly */
+        tal_system_sleep(100);
+        
+        /* Delete the saved WiFi credentials from KV storage */
+        tal_kv_del("netinfo");
+        PR_NOTICE("Deleted saved WiFi credentials from flash");
+        
+        /* Use NETCONN_CMD_RESET (7) to signal netmgr to stop */
+        extern OPERATE_RET netmgr_conn_set(int type, int cmd, void *param);
+        netmgr_conn_set(1, 7, NULL);  /* NETCONN_WIFI=1, NETCONN_CMD_RESET=7 */
+        
+        /* Also directly call low-level WiFi disconnect */
+        extern OPERATE_RET tal_wifi_station_disconnect(void);
+        tal_wifi_station_disconnect();
+        
+        /* Wait a bit and disconnect again to be sure */
+        tal_system_sleep(500);
+        tal_wifi_station_disconnect();
+        
+        PR_NOTICE("WiFi disconnected and credentials cleared");
+        
+        const char *ack_json = "{\"type\":\"ack\",\"msg\":\"WiFi disconnected. Credentials cleared - reconfigure via BLE.\"}";
         size_t ack_len = strlen(ack_json);
         uint8_t *resp = tal_malloc(4 + ack_len);
         if (resp) {

@@ -415,7 +415,6 @@ class TuyaBLECrypto {
         return result;
     }
 
-    // Decrypt a packet
     async decryptPacket(encryptedPacket) {
         if (encryptedPacket.length < 17) {
             throw new Error('Packet too short');
@@ -424,7 +423,9 @@ class TuyaBLECrypto {
         const mode = encryptedPacket[0];
 
         if (mode === 0) {
-            return encryptedPacket.slice(1);
+            // Mode 0: No encryption, but packet still has mode(1) + iv(16) + data structure
+            // Skip the full 17-byte header
+            return encryptedPacket.slice(17);
         }
 
         // Extract IV and update serviceRand for key generation
