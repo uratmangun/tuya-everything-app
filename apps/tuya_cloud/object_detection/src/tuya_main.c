@@ -543,18 +543,21 @@ void user_main(void)
         PR_INFO("Audio player initialized successfully");
         
         /* Open the audio device to enable playback */
+        /* We pass the mic streaming callback so it can capture mic data when streaming is enabled */
         TDL_AUDIO_HANDLE_T audio_hdl = NULL;
         rt = tdl_audio_find(AUDIO_CODEC_NAME, &audio_hdl);
         if (rt != OPRT_OK) {
             PR_ERR("Failed to find audio codec: %d", rt);
             g_audio_initialized = false;
         } else {
-            rt = tdl_audio_open(audio_hdl, NULL);
+            /* Open with mic callback - callback will ignore data when streaming is disabled */
+            TDL_AUDIO_MIC_CB mic_cb = (TDL_AUDIO_MIC_CB)mic_streaming_get_callback();
+            rt = tdl_audio_open(audio_hdl, mic_cb);
             if (rt != OPRT_OK) {
                 PR_ERR("Failed to open audio device: %d", rt);
                 g_audio_initialized = false;
             } else {
-                PR_INFO("Audio device opened successfully");
+                PR_INFO("Audio device opened successfully (with mic callback)");
                 g_audio_initialized = true;
                 
                 /* Enable speaker amplifier GPIO (GPIO39 on T5AI-CORE) */

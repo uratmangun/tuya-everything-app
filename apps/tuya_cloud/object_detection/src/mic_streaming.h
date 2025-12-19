@@ -62,6 +62,16 @@ bool mic_streaming_is_active(void);
  */
 void mic_streaming_get_stats(uint32_t *bytes_sent, uint32_t *frames_sent);
 
+/**
+ * @brief Get the audio callback for mic streaming
+ * 
+ * This callback should be passed to tdl_audio_open() during initial
+ * audio device setup. It will forward mic data when streaming is active.
+ * 
+ * @return Pointer to the mic audio callback function
+ */
+void *mic_streaming_get_callback(void);
+
 #ifdef __cplusplus
 }
 #endif

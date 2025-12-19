@@ -180,13 +180,8 @@ OPERATE_RET mic_streaming_start(void)
     /* Reset ring buffer */
     tuya_ring_buff_reset(g_mic_ctx.ringbuf);
     
-    /* Register audio callback to start receiving mic data */
-    /* Note: The audio device may need to be re-opened with the callback */
-    rt = tdl_audio_open(g_mic_ctx.audio_hdl, mic_audio_frame_callback);
-    if (rt != OPRT_OK) {
-        PR_ERR("Failed to open audio with callback: %d", rt);
-        return rt;
-    }
+    /* Note: The audio device is already open with our callback from tuya_main.c
+     * We just set the streaming flag and the callback will start buffering data */
     
     /* Reset stats */
     g_mic_ctx.total_bytes_sent = 0;
@@ -232,8 +227,8 @@ OPERATE_RET mic_streaming_stop(void)
         g_mic_ctx.stream_thread = NULL;
     }
     
-    /* Close audio device (stops mic capture) - re-open without callback for speaker only */
-    tdl_audio_open(g_mic_ctx.audio_hdl, NULL);
+    /* Note: We don't close/reopen the audio device - it stays open with our callback.
+     * The callback checks the streaming flag and ignores data when not streaming. */
     
     /* Clear ring buffer */
     tuya_ring_buff_reset(g_mic_ctx.ringbuf);
@@ -257,4 +252,9 @@ void mic_streaming_get_stats(uint32_t *bytes_sent, uint32_t *frames_sent)
     if (frames_sent) {
         *frames_sent = g_mic_ctx.total_frames_sent;
     }
+}
+
+void *mic_streaming_get_callback(void)
+{
+    return (void *)mic_audio_frame_callback;
 }
