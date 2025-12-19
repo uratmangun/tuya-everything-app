@@ -89,6 +89,11 @@ app.use((req, res, next) => {
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Redirect /ble to /ble/index.html
+app.get('/ble', (req, res) => {
+    res.redirect('/ble/index.html');
+});
+
 // ==================== TCP Server for DevKit ====================
 const tcpServer = net.createServer((socket) => {
     const clientInfo = `${socket.remoteAddress}:${socket.remotePort}`;

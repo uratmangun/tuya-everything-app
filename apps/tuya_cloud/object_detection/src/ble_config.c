@@ -172,11 +172,51 @@ static void ble_config_channel_handler(void *data, void *user_data)
         /* Get TCP status */
         bool tcp_connected = tcp_client_is_connected();
         
+        /* Get current TCP settings for debugging */
+        char tcp_host[64] = "";
+        uint16_t tcp_port = 0;
+        char tcp_token[64] = "";
+        if (ble_config_load_tcp_settings(tcp_host, &tcp_port, tcp_token) != OPRT_OK || !tcp_host[0]) {
+            /* Use compile-time defaults */
+            strncpy(tcp_host, TCP_SERVER_HOST, sizeof(tcp_host) - 1);
+            tcp_port = TCP_SERVER_PORT;
+        }
+        
+        /* Get WiFi SSID and IP if connected */
+        char wifi_ssid[33] = "";
+        char wifi_ip[16] = "";
+        if (wifi_connected) {
+            /* Get IP address using tal_wifi_get_ip */
+            NW_IP_S ip_info;
+            memset(&ip_info, 0, sizeof(ip_info));
+            if (tal_wifi_get_ip(WF_STATION, &ip_info) == OPRT_OK) {
+                strncpy(wifi_ip, ip_info.ip, sizeof(wifi_ip) - 1);
+            }
+            
+            /* For SSID, we'll use the saved SSID from KV storage */
+            /* since there's no direct API to get current connected SSID */
+            uint8_t *ssid_value = NULL;
+            size_t ssid_len = 0;
+            if (tal_kv_get("wifi_ssid", &ssid_value, &ssid_len) == OPRT_OK && ssid_value) {
+                strncpy(wifi_ssid, (char *)ssid_value, sizeof(wifi_ssid) - 1);
+                tal_kv_free(ssid_value);
+            } else {
+                strcpy(wifi_ssid, "Connected");  /* Fallback if not saved */
+            }
+        }
+        
+        PR_NOTICE("Status: wifi=%d, ssid=%s, ip=%s, tcp=%d, host=%s, port=%d", 
+                  wifi_connected, wifi_ssid, wifi_ip, tcp_connected, tcp_host, tcp_port);
+        
         /* Build status JSON response */
         cJSON *status = cJSON_CreateObject();
         cJSON_AddStringToObject(status, "type", "status");
         cJSON_AddBoolToObject(status, "wifi_connected", wifi_connected);
+        cJSON_AddStringToObject(status, "ssid", wifi_ssid);
+        cJSON_AddStringToObject(status, "ip", wifi_ip);
         cJSON_AddBoolToObject(status, "tcp_connected", tcp_connected);
+        cJSON_AddStringToObject(status, "tcp_host", tcp_host);
+        cJSON_AddNumberToObject(status, "tcp_port", tcp_port);
         cJSON_AddNumberToObject(status, "heap", tal_system_get_free_heap_size());
         
         char *status_str = cJSON_PrintUnformatted(status);
@@ -199,11 +239,22 @@ static void ble_config_channel_handler(void *data, void *user_data)
     else if (strcmp(cmd->valuestring, "tcp_connect") == 0) {
         PR_NOTICE("BLE config: TCP connect requested");
         
+        /* Show current TCP configuration for debugging */
+        char debug_host[64] = "";
+        uint16_t debug_port = 0;
+        char debug_token[64] = "";
+        if (ble_config_load_tcp_settings(debug_host, &debug_port, debug_token) == OPRT_OK && debug_host[0]) {
+            PR_NOTICE("TCP Config (from KV): host=%s, port=%d", debug_host, debug_port);
+        } else {
+            PR_NOTICE("TCP Config (from .env): host=%s, port=%d", TCP_SERVER_HOST, TCP_SERVER_PORT);
+        }
+        
         /* Check if WiFi is connected first */
         WF_STATION_STAT_E wifi_stat = WSS_IDLE;
         tal_wifi_station_get_status(&wifi_stat);
         
         if (wifi_stat != WSS_GOT_IP) {
+            PR_ERR("WiFi not connected (status=%d), cannot start TCP", wifi_stat);
             const char *err_json = "{\"type\":\"error\",\"msg\":\"WiFi not connected\"}";
             size_t err_len = strlen(err_json);
             uint8_t *resp = tal_malloc(4 + err_len);
@@ -214,9 +265,11 @@ static void ble_config_channel_handler(void *data, void *user_data)
                 tal_free(resp);
             }
         } else {
+            PR_NOTICE("WiFi connected, starting TCP client...");
             /* Start TCP client */
             extern OPERATE_RET tcp_client_start(void);
-            tcp_client_start();
+            OPERATE_RET rt = tcp_client_start();
+            PR_NOTICE("tcp_client_start() returned: %d", rt);
             
             const char *ack_json = "{\"type\":\"ack\",\"msg\":\"TCP connecting...\"}";
             size_t ack_len = strlen(ack_json);
@@ -277,16 +330,31 @@ static void ble_config_channel_handler(void *data, void *user_data)
         if (rt == OPRT_OK && ap_info) {
             PR_NOTICE("WiFi scan found %d networks", ap_count);
             
+            /* Sort networks by RSSI (signal strength) - highest first
+             * Simple bubble sort since we only care about top 2 networks
+             */
+            for (uint32_t i = 0; i < ap_count - 1; i++) {
+                for (uint32_t j = 0; j < ap_count - i - 1; j++) {
+                    if (ap_info[j].rssi < ap_info[j + 1].rssi) {
+                        /* Swap */
+                        AP_IF_S temp = ap_info[j];
+                        ap_info[j] = ap_info[j + 1];
+                        ap_info[j + 1] = temp;
+                    }
+                }
+            }
+            
             /* Build JSON response with WiFi list */
             cJSON *resp_json = cJSON_CreateObject();
             cJSON_AddStringToObject(resp_json, "type", "wifi_list");
             cJSON *networks = cJSON_CreateArray();
             
-            /* Limit to 5 networks to fit in BLE MTU (256 bytes)
-             * Each network entry is ~40-50 bytes, so 5 networks = ~200-250 bytes
-             * Plus JSON wrapper = ~240 bytes max
+            /* Limit to 2 networks to fit in BLE MTU (256 bytes)
+             * Each network entry is ~40-50 bytes, so 2 networks = ~80-100 bytes
+             * Plus JSON wrapper = ~120 bytes max (safe for BLE MTU)
+             * We sort by RSSI first and pick the strongest signals
              */
-            uint32_t max_networks = (ap_count > 5) ? 5 : ap_count;
+            uint32_t max_networks = 2;
             uint32_t added = 0;
             for (uint32_t i = 0; i < ap_count && added < max_networks; i++) {
                 if (strlen((char*)ap_info[i].ssid) > 0) {  /* Skip hidden networks */
@@ -296,6 +364,7 @@ static void ble_config_channel_handler(void *data, void *user_data)
                     cJSON_AddNumberToObject(net, "ch", ap_info[i].channel);
                     cJSON_AddItemToArray(networks, net);
                     added++;
+                    PR_DEBUG("Added network %d: %s (RSSI: %d)", added, ap_info[i].ssid, ap_info[i].rssi);
                 }
             }
             cJSON_AddItemToObject(resp_json, "networks", networks);
@@ -303,28 +372,7 @@ static void ble_config_channel_handler(void *data, void *user_data)
             char *json_str = cJSON_PrintUnformatted(resp_json);
             if (json_str) {
                 size_t json_len = strlen(json_str);
-                PR_NOTICE("Sending WiFi list via BLE: %d bytes (%d networks)", json_len, added);
-                
-                /* Check if response fits in BLE MTU (leave room for header) */
-                if (json_len + 4 > 240) {
-                    PR_WARN("WiFi list too large (%d bytes), truncating", json_len);
-                    tal_free(json_str);
-                    cJSON_Delete(resp_json);
-                    
-                    /* Send truncated error response */
-                    const char *err_json = "{\"type\":\"wifi_list\",\"networks\":[],\"msg\":\"Too many networks\"}";
-                    size_t err_len = strlen(err_json);
-                    uint8_t *resp = tal_malloc(4 + err_len);
-                    if (resp) {
-                        resp[0] = 0x00; resp[1] = 0x00; resp[2] = 0x00; resp[3] = BLE_CHANNEL_CONFIG;
-                        memcpy(resp + 4, err_json, err_len);
-                        tuya_ble_send(FRM_UPLINK_TRANSPARENT_REQ, 0, resp, 4 + err_len);
-                        tal_free(resp);
-                    }
-                    tal_wifi_release_ap(ap_info);
-                    cJSON_Delete(root);
-                    return;
-                }
+                PR_NOTICE("Sending WiFi list via BLE: %d bytes (%d strongest networks)", (int)json_len, added);
                 
                 /* Send via BLE transparent channel */
                 uint8_t *resp = tal_malloc(4 + json_len);
@@ -343,6 +391,16 @@ static void ble_config_channel_handler(void *data, void *user_data)
             tal_wifi_release_ap(ap_info);
         } else {
             PR_ERR("WiFi scan failed: %d", rt);
+            /* Send error response */
+            const char *err_json = "{\"type\":\"error\",\"msg\":\"WiFi scan failed\"}";
+            size_t err_len = strlen(err_json);
+            uint8_t *resp = tal_malloc(4 + err_len);
+            if (resp) {
+                resp[0] = 0x00; resp[1] = 0x00; resp[2] = 0x00; resp[3] = BLE_CHANNEL_CONFIG;
+                memcpy(resp + 4, err_json, err_len);
+                tuya_ble_send(FRM_UPLINK_TRANSPARENT_REQ, 0, resp, 4 + err_len);
+                tal_free(resp);
+            }
         }
     }
     /* Handle wifi_disconnect command */

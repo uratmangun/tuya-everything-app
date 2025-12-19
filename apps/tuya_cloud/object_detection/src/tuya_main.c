@@ -103,6 +103,12 @@ static void tcp_message_callback(const char *data, uint32_t len)
     
     char response[256];
     
+    /* Handle server responses (not commands) */
+    if (strncmp(data, "auth:ok", 7) == 0) {
+        PR_INFO("Server authenticated us successfully");
+        return;  /* Don't process as a command */
+    }
+    
     /* Handle different commands from web app */
     if (strncmp(data, "ping", 4) == 0) {
         tcp_client_send_str("pong");

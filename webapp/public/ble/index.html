@@ -567,10 +567,18 @@
 
                     <div class="form-group">
                         <label>WiFi Password</label>
-                        <input type="password" id="wifiPassword" placeholder="Enter password">
+                        <div style="position: relative;">
+                            <input type="password" id="wifiPassword" placeholder="Enter password"
+                                style="padding-right: 45px;">
+                            <button type="button" onclick="togglePasswordVisibility()" id="togglePasswordBtn"
+                                style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); background: none; border: none; cursor: pointer; font-size: 18px; padding: 5px; color: var(--text-muted);"
+                                title="Show/Hide password">
+                                👁️
+                            </button>
+                        </div>
                     </div>
 
-                    <button class="btn btn-primary" onclick="saveWifiSettings()">
+                    <button class="btn btn-primary" onclick="saveWifiSettings()" id="connectWifiBtn">
                         <span>📡</span> Connect to WiFi
                     </button>
                 </div>
@@ -1261,28 +1269,39 @@
             // FRM_DOWNLINK_TRANSPARENT response (0x801B) or FRM_UPLINK_TRANSPARENT response (0x801C)
             else if (cmdType === 0x801B || cmdType === 0x801C) {
                 console.log('Transparent data response, payload length:', payload.length);
+                const hexPayload = Array.from(payload).map(b => b.toString(16).padStart(2, '0')).join(' ');
+                console.log('Payload hex:', hexPayload);
                 addBleLog(`Transparent data CMD=0x${cmdType.toString(16)}, len=${payload.length}`, 'info');
 
-                try {
-                    // Format: flags(2) + channel(2) + json_data
-                    // Skip 4 bytes header
-                    const jsonStr = new TextDecoder().decode(payload.slice(4));
-                    console.log('JSON string:', jsonStr);
-                    addBleLog(`JSON: ${jsonStr.substring(0, 80)}${jsonStr.length > 80 ? '...' : ''}`, 'recv');
-                    const response = JSON.parse(jsonStr);
-                    handleResponse(response);
-                } catch (e) {
-                    console.log('Failed to parse transparent data:', e);
-                    // Try without header skip (legacy format)
+                // Try to find JSON in the payload by looking for '{' character
+                let jsonStart = -1;
+                for (let i = 0; i < payload.length; i++) {
+                    if (payload[i] === 0x7B) { // '{' character
+                        jsonStart = i;
+                        break;
+                    }
+                }
+
+                if (jsonStart >= 0) {
                     try {
-                        const jsonStr = new TextDecoder().decode(payload);
-                        addBleLog(`Legacy JSON: ${jsonStr.substring(0, 80)}`, 'warn');
+                        const jsonStr = new TextDecoder().decode(payload.slice(jsonStart));
+                        console.log('JSON string (offset ' + jsonStart + '):', jsonStr);
+                        addBleLog(`JSON (offset ${jsonStart}): ${jsonStr.substring(0, 80)}${jsonStr.length > 80 ? '...' : ''}`, 'recv');
                         const response = JSON.parse(jsonStr);
                         handleResponse(response);
-                    } catch (e2) {
-                        console.log('Also failed legacy parse:', e2);
-                        addBleLog('Failed to parse transparent data', 'error');
+                    } catch (e) {
+                        console.log('Failed to parse JSON at offset', jsonStart, ':', e.message);
+                        // Try to show what we received as text
+                        const textStr = new TextDecoder().decode(payload);
+                        addBleLog(`Parse failed, raw text: ${textStr.substring(0, 100)}`, 'error');
+                        handleTextResponse(textStr);
                     }
+                } else {
+                    // No JSON found, treat as text response
+                    const textStr = new TextDecoder().decode(payload);
+                    console.log('No JSON found in payload, treating as text:', textStr);
+                    addBleLog(`Non-JSON response: ${textStr.substring(0, 100)}`, 'warn');
+                    handleTextResponse(textStr);
                 }
             }
             else {
@@ -1463,7 +1482,10 @@
             };
 
             if (await sendCommand(cmd)) {
-                showToast('✅', 'TCP settings saved! Reboot to apply.', 'success');
+                showToast('✅', 'TCP settings saved! Connecting...', 'success');
+                // Automatically connect to TCP after saving settings
+                await new Promise(resolve => setTimeout(resolve, 500));
+                await connectTcp();
             }
         }
 
@@ -1512,33 +1534,70 @@
         function displayWifiList(networks) {
             const container = document.getElementById('wifiList');
 
-            if (networks.length === 0) {
+            if (!networks || networks.length === 0) {
                 container.innerHTML = '<div style="text-align: center; color: var(--text-muted); padding: 20px;">No networks found</div>';
                 return;
             }
 
-            container.innerHTML = networks.map(net => `
-                <div class="wifi-item" onclick="selectWifi('${net.ssid}')">
-                    <span class="ssid">${net.ssid}</span>
-                    <span class="signal">${getSignalIcon(net.rssi)} ${net.rssi} dBm</span>
-                </div>
-            `).join('');
+            // Sort by RSSI (strongest first) - in case not already sorted
+            networks.sort((a, b) => b.rssi - a.rssi);
+
+            container.innerHTML = networks.map(net => {
+                const signalPercent = getSignalPercent(net.rssi);
+                const signalIcon = getSignalIcon(net.rssi);
+                const signalColor = signalPercent > 70 ? '#10b981' : (signalPercent > 40 ? '#f59e0b' : '#ef4444');
+
+                return `
+                    <div class="wifi-item" data-ssid="${escapeHtml(net.ssid)}" onclick="selectWifi(this)">
+                        <div style="display: flex; flex-direction: column; gap: 2px;">
+                            <span class="ssid">${escapeHtml(net.ssid)}</span>
+                            <span style="font-size: 11px; color: var(--text-muted);">Ch ${net.ch || '?'}</span>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <div style="width: 50px; height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; overflow: hidden;">
+                                <div style="width: ${signalPercent}%; height: 100%; background: ${signalColor};"></div>
+                            </div>
+                            <span class="signal" style="min-width: 70px; text-align: right;">${signalIcon} ${net.rssi} dBm</span>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            addBleLog(`Displayed ${networks.length} WiFi networks`, 'info');
+        }
+
+        function getSignalPercent(rssi) {
+            // Convert RSSI to percentage (approx: -30 = 100%, -90 = 0%)
+            const percent = Math.min(100, Math.max(0, ((rssi + 90) / 60) * 100));
+            return Math.round(percent);
         }
 
         function getSignalIcon(rssi) {
-            if (rssi > -50) return '📶';
-            if (rssi > -70) return '📶';
-            return '📶';
+            if (rssi > -50) return '📶';  // Excellent
+            if (rssi > -60) return '📶';  // Good
+            if (rssi > -70) return '📶';  // Fair
+            return '📶';  // Weak
         }
 
-        function selectWifi(ssid) {
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function selectWifi(element) {
+            const ssid = element.getAttribute('data-ssid');
+
             // Update selection UI
             document.querySelectorAll('.wifi-item').forEach(el => el.classList.remove('selected'));
-            event.target.closest('.wifi-item').classList.add('selected');
+            element.classList.add('selected');
 
             // Fill in SSID
             document.getElementById('wifiSsid').value = ssid;
             document.getElementById('wifiPassword').focus();
+
+            addBleLog(`Selected WiFi: ${ssid}`, 'info');
+            showToast('📶', `Selected: ${ssid}`, 'success');
         }
 
         async function saveWifiSettings() {
@@ -1550,6 +1609,11 @@
                 return;
             }
 
+            // Disable button while connecting
+            const btn = document.getElementById('connectWifiBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<div class="spinner"></div> Connecting...';
+
             const cmd = {
                 cmd: 'set_wifi',
                 ssid: ssid,
@@ -1557,7 +1621,36 @@
             };
 
             if (await sendCommand(cmd)) {
-                showToast('✅', 'WiFi settings saved! Connecting...', 'success');
+                showToast('✅', 'WiFi settings sent! Waiting for connection...', 'success');
+                // Wait for the DevKit to connect and respond with status
+                // The button will be re-enabled when we get a wifi_connected status
+                setTimeout(() => {
+                    refreshStatus();
+                    // Re-enable button after timeout if no response
+                    setTimeout(() => {
+                        btn.disabled = false;
+                        btn.innerHTML = '<span>📡</span> Connect to WiFi';
+                    }, 5000);
+                }, 3000);
+            } else {
+                btn.disabled = false;
+                btn.innerHTML = '<span>📡</span> Connect to WiFi';
+            }
+        }
+
+        // ===== Password Toggle =====
+        function togglePasswordVisibility() {
+            const passwordInput = document.getElementById('wifiPassword');
+            const toggleBtn = document.getElementById('togglePasswordBtn');
+
+            if (passwordInput.type === 'password') {
+                passwordInput.type = 'text';
+                toggleBtn.textContent = '🙈';
+                toggleBtn.title = 'Hide password';
+            } else {
+                passwordInput.type = 'password';
+                toggleBtn.textContent = '👁️';
+                toggleBtn.title = 'Show password';
             }
         }
 
@@ -1586,6 +1679,35 @@
                     tcpStatusText.textContent = 'Disconnected';
                     tcpStatusText.style.color = '#dc3545';
                 }
+            }
+
+            // Update TCP control buttons based on connection state
+            const connectTcpBtn = document.getElementById('connectTcpBtn');
+            const disconnectTcpBtn = document.getElementById('disconnectTcpBtn');
+            if (connectTcpBtn && disconnectTcpBtn) {
+                if (data.tcp_connected) {
+                    connectTcpBtn.disabled = true;
+                    disconnectTcpBtn.disabled = false;
+                } else {
+                    connectTcpBtn.disabled = false;
+                    disconnectTcpBtn.disabled = true;
+                }
+                // Reset button text
+                connectTcpBtn.innerHTML = '<span>🔌</span> Connect TCP';
+                disconnectTcpBtn.innerHTML = '<span>🔌</span> Disconnect TCP';
+            }
+
+            // Update WiFi disconnect button based on WiFi connection state
+            const disconnectWifiBtn = document.getElementById('disconnectWifiBtn');
+            if (disconnectWifiBtn) {
+                disconnectWifiBtn.disabled = !data.wifi_connected;
+            }
+
+            // Re-enable WiFi connect button if we got a response
+            const connectWifiBtn = document.getElementById('connectWifiBtn');
+            if (connectWifiBtn && data.wifi_connected) {
+                connectWifiBtn.disabled = false;
+                connectWifiBtn.innerHTML = '<span>📡</span> Connect to WiFi';
             }
 
             // Update TCP settings if available
