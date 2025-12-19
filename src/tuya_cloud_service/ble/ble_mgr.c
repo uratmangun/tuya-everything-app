@@ -283,11 +283,15 @@ static int ble_packet_recv(tuya_ble_mgr_t *ble, uint8_t *buf, uint16_t len, ble_
         return OPRT_INVALID_PARM;
     }
     tuya_ble_raw_print("ble raw packet", 32, packet_recv->raw_buf, packet_recv->raw_len);
+    PR_DEBUG("ble raw: len=%d, mode=%d, first bytes: %02x %02x %02x %02x %02x", 
+             packet_recv->raw_len, packet_recv->raw_buf[0],
+             packet_recv->raw_buf[0], packet_recv->raw_buf[1], 
+             packet_recv->raw_buf[2], packet_recv->raw_buf[3], packet_recv->raw_buf[4]);
     memset(packet_recv->dec_buf, 0, TUYA_BLE_AIR_FRAME_MAX);
     rt = tuya_ble_decryption(&ble->crypto_param, packet_recv->raw_buf, packet_recv->raw_len, &packet_recv->dec_len,
                              packet_recv->dec_buf);
     if (rt != 0) {
-        PR_ERR("ble packet decrypt err:%d", rt);
+        PR_ERR("ble packet decrypt err:%d (mode byte was: 0x%02x)", rt, packet_recv->raw_buf[0]);
         return OPRT_INVALID_PARM;
     }
     tuya_ble_raw_print("ble dec packet", 32, packet_recv->dec_buf, packet_recv->dec_len);
@@ -385,10 +389,19 @@ int tuya_ble_adv_update(void)
 
 static void ble_pair_timeout_cb(TIMER_ID timer_id, void *arg)
 {
-    tuya_ble_mgr_t *ble = (tuya_ble_mgr_t *)arg;
+    (void)timer_id;  // Unused
+    (void)arg;       // Unused in dev mode
 
-    PR_DEBUG("ble pair timeout then disconnect!!");
-    tal_ble_disconnect(ble->peer_info);
+    /*
+     * DISABLED FOR DEVELOPMENT: Don't disconnect on pair timeout.
+     * This allows Web Bluetooth connections to stay alive without
+     * implementing the full Tuya pairing protocol.
+     * 
+     * Original behavior:
+     *   tuya_ble_mgr_t *ble = (tuya_ble_mgr_t *)arg;
+     *   tal_ble_disconnect(ble->peer_info);
+     */
+    PR_DEBUG("ble pair timeout - keeping connection alive (dev mode)");
 }
 
 /* gateway auto check callback*/
@@ -644,11 +657,10 @@ int tuya_ble_send_packet(ble_packet_t *packet)
     tuya_ble_mgr_t *ble = s_ble_mgr;
 
     if (!ble->is_paired) {
-        PR_NOTICE("ble not paired");
-        return OPRT_OK;
-    }
-
-    if (FRM_QRY_DEV_INFO_REQ == packet->type) {
+        /* Dev mode: allow sending without pairing, use no encryption */
+        PR_DEBUG("ble sending unencrypted (dev mode)");
+        packet->encrypt_mode = ENCRYPTION_MODE_NONE;
+    } else if (FRM_QRY_DEV_INFO_REQ == packet->type) {
         packet->encrypt_mode = *ble->is_bound ? ENCRYPTION_MODE_KEY_14 : ENCRYPTION_MODE_KEY_11;
     } else {
         packet->encrypt_mode = *ble->is_bound ? ENCRYPTION_MODE_SESSION_KEY15 : ENCRYPTION_MODE_KEY_12;

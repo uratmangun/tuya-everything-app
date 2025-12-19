@@ -20,6 +20,7 @@
 
 /* WiFi direct connect API */
 #include "tkl_wifi.h"
+#include "tal_wifi.h"
 
 /* BLE channel for receiving config commands */
 #include "ble_channel.h"
@@ -90,8 +91,8 @@ OPERATE_RET ble_config_wifi_connect(const char *ssid, const char *password)
  * - {"cmd":"reboot"}
  ***********************************************************/
 
-/* Channel type for our config handler */
-#define BLE_CHANNEL_CONFIG 0x10
+/* Channel type for our config handler - use 0 since BLE_CHANNEL_MAX is only 2 */
+#define BLE_CHANNEL_CONFIG 0
 
 static void ble_config_channel_handler(void *data, void *user_data)
 {
@@ -172,6 +173,97 @@ static void ble_config_channel_handler(void *data, void *user_data)
             tal_free(status_str);
         }
         cJSON_Delete(status);
+    }
+    /* Handle wifi_scan command */
+    else if (strcmp(cmd->valuestring, "wifi_scan") == 0) {
+        PR_NOTICE("BLE config: WiFi scan requested");
+        
+        /* Check if WiFi is connected - scanning will disrupt connection */
+        WF_STATION_STAT_E wifi_stat = WSS_IDLE;
+        tal_wifi_station_get_status(&wifi_stat);
+        
+        if (wifi_stat == WSS_GOT_IP) {
+            PR_WARN("WiFi is connected - scan will disrupt connection!");
+            /* Send error response */
+            const char *err_json = "{\"type\":\"error\",\"msg\":\"WiFi connected. Disconnect first to scan.\"}";
+            size_t err_len = strlen(err_json);
+            uint8_t *resp = tal_malloc(4 + err_len);
+            if (resp) {
+                resp[0] = 0x00; resp[1] = 0x00; resp[2] = 0x00; resp[3] = BLE_CHANNEL_CONFIG;
+                memcpy(resp + 4, err_json, err_len);
+                tuya_ble_send(FRM_UPLINK_TRANSPARENT_REQ, 0, resp, 4 + err_len);
+                tal_free(resp);
+            }
+            cJSON_Delete(root);
+            return;
+        }
+        
+        AP_IF_S *ap_info = NULL;
+        uint32_t ap_count = 0;
+        
+        OPERATE_RET rt = tal_wifi_all_ap_scan(&ap_info, &ap_count);
+        if (rt == OPRT_OK && ap_info) {
+            PR_NOTICE("WiFi scan found %d networks", ap_count);
+            
+            /* Build JSON response with WiFi list */
+            cJSON *resp_json = cJSON_CreateObject();
+            cJSON_AddStringToObject(resp_json, "type", "wifi_list");
+            cJSON *networks = cJSON_CreateArray();
+            
+            /* Limit to 10 networks to fit in BLE packet */
+            uint32_t max_networks = (ap_count > 10) ? 10 : ap_count;
+            for (uint32_t i = 0; i < max_networks; i++) {
+                if (strlen((char*)ap_info[i].ssid) > 0) {  /* Skip hidden networks */
+                    cJSON *net = cJSON_CreateObject();
+                    cJSON_AddStringToObject(net, "ssid", (char*)ap_info[i].ssid);
+                    cJSON_AddNumberToObject(net, "rssi", ap_info[i].rssi);
+                    cJSON_AddNumberToObject(net, "ch", ap_info[i].channel);
+                    cJSON_AddItemToArray(networks, net);
+                }
+            }
+            cJSON_AddItemToObject(resp_json, "networks", networks);
+            
+            char *json_str = cJSON_PrintUnformatted(resp_json);
+            if (json_str) {
+                PR_NOTICE("Sending WiFi list via BLE: %d bytes", strlen(json_str));
+                
+                /* Send via BLE transparent channel */
+                size_t json_len = strlen(json_str);
+                uint8_t *resp = tal_malloc(4 + json_len);
+                if (resp) {
+                    resp[0] = 0x00;  /* flags low */
+                    resp[1] = 0x00;  /* flags high */
+                    resp[2] = 0x00;  /* channel high */
+                    resp[3] = BLE_CHANNEL_CONFIG;  /* channel low */
+                    memcpy(resp + 4, json_str, json_len);
+                    tuya_ble_send(FRM_UPLINK_TRANSPARENT_REQ, 0, resp, 4 + json_len);
+                    tal_free(resp);
+                }
+                tal_free(json_str);
+            }
+            cJSON_Delete(resp_json);
+            tal_wifi_release_ap(ap_info);
+        } else {
+            PR_ERR("WiFi scan failed: %d", rt);
+        }
+    }
+    /* Handle wifi_disconnect command */
+    else if (strcmp(cmd->valuestring, "wifi_disconnect") == 0) {
+        PR_NOTICE("BLE config: WiFi disconnect requested");
+        
+        /* Use netmgr to properly close connection and stop auto-reconnect */
+        extern OPERATE_RET netmgr_conn_set(int type, int cmd, void *param);
+        netmgr_conn_set(1, 6, NULL);  /* NETCONN_WIFI=1, NETCONN_CMD_CLOSE=6 */
+        
+        const char *ack_json = "{\"type\":\"ack\",\"msg\":\"WiFi disconnected\"}";
+        size_t ack_len = strlen(ack_json);
+        uint8_t *resp = tal_malloc(4 + ack_len);
+        if (resp) {
+            resp[0] = 0x00; resp[1] = 0x00; resp[2] = 0x00; resp[3] = BLE_CHANNEL_CONFIG;
+            memcpy(resp + 4, ack_json, ack_len);
+            tuya_ble_send(FRM_UPLINK_TRANSPARENT_REQ, 0, resp, 4 + ack_len);
+            tal_free(resp);
+        }
     }
     /* Handle reboot command */
     else if (strcmp(cmd->valuestring, "reboot") == 0) {

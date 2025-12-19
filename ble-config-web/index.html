@@ -447,6 +447,17 @@
                     <span>🔗</span> Connect to T5AI
                 </button>
 
+                <div style="display: flex; gap: 8px; margin-top: 12px;">
+                    <button class="btn" id="scanAllBtn" onclick="connectDeviceAll()"
+                        style="flex: 1; background: var(--secondary); font-size: 12px; padding: 10px;">
+                        <span>📡</span> Scan All Devices
+                    </button>
+                    <button class="btn" id="reconnectBtn" onclick="reconnectDevice()"
+                        style="flex: 1; background: var(--accent); font-size: 12px; padding: 10px;">
+                        <span>🔄</span> Reconnect Last
+                    </button>
+                </div>
+
                 <button class="btn btn-danger hidden" id="disconnectBtn" onclick="disconnectDevice()"
                     style="margin-top: 12px;">
                     <span>❌</span> Disconnect
@@ -455,13 +466,13 @@
                 <div
                     style="margin-top: 16px; padding: 12px; background: rgba(245, 158, 11, 0.1); border-radius: 10px; font-size: 13px; color: var(--text-secondary);">
                     <strong>⚠️ Device not appearing?</strong><br>
-                    • Device advertises as <strong>"TYBLE"</strong> or <strong>"TY..."</strong><br>
-                    • BLE is disabled when device is connected to WiFi/IoT cloud<br>
-                    • Run <code
+                    • Device advertises as <strong>"TYBLE"</strong> or <strong>"BLE"</strong><br>
+                    • BLE may be disabled when connected to WiFi/IoT cloud<br>
+                    • Click <strong>"Scan All Devices"</strong> to see all nearby Bluetooth devices<br>
+                    • Use <strong>"Reconnect Last"</strong> if you connected before<br>
+                    • Or run <code
                         style="background: var(--bg-secondary); padding: 2px 6px; border-radius: 4px;">reset</code> in
-                    CLI to enter pairing mode<br>
-                    • Or use CLI command: <code
-                        style="background: var(--bg-secondary); padding: 2px 6px; border-radius: 4px;">wifi_connect SSID password</code>
+                    CLI
                 </div>
             </div>
 
@@ -507,14 +518,18 @@
                         <h2>WiFi Configuration</h2>
                     </div>
 
-                    <button class="btn btn-secondary" onclick="scanWifi()" id="scanWifiBtn"
-                        style="margin-bottom: 16px;">
-                        <span>🔍</span> Scan WiFi Networks
-                    </button>
+                    <div style="display: flex; gap: 8px; margin-bottom: 16px;">
+                        <button class="btn btn-secondary" onclick="scanWifi()" id="scanWifiBtn" style="flex: 1;">
+                            <span>🔍</span> Scan WiFi
+                        </button>
+                        <button class="btn btn-secondary" onclick="disconnectWifi()" id="disconnectWifiBtn" style="flex: 1; background: #dc3545;">
+                            <span>📴</span> Disconnect WiFi
+                        </button>
+                    </div>
 
                     <div class="wifi-list" id="wifiList">
                         <div style="text-align: center; color: var(--text-muted); padding: 20px;">
-                            Click "Scan WiFi Networks" to find available networks
+                            Disconnect WiFi first, then scan for networks
                         </div>
                     </div>
 
@@ -571,6 +586,16 @@
 
                     <div class="section-divider"></div>
 
+                    <h3 style="margin-bottom: 8px;">📡 BLE Log</h3>
+                    <div id="bleLog" style="background: #1a1a2e; border-radius: 8px; padding: 12px; max-height: 200px; overflow-y: auto; font-family: monospace; font-size: 12px; color: #0f0;">
+                        <div>Waiting for BLE data...</div>
+                    </div>
+                    <button class="btn btn-secondary" onclick="clearBleLog()" style="margin-top: 8px;">
+                        <span>🗑️</span> Clear Log
+                    </button>
+
+                    <div class="section-divider"></div>
+
                     <button class="btn btn-danger" onclick="rebootDevice()">
                         <span>🔄</span> Reboot Device
                     </button>
@@ -590,20 +615,26 @@
         <span id="toastMessage">Message</span>
     </div>
 
+    <!-- Tuya BLE Crypto Library -->
+    <script src="tuya-ble-crypto.js"></script>
+
     <script>
         // ===== Configuration =====
-        // Tuya BLE Service UUID (standard Tuya)
-        const TUYA_SERVICE_UUID = '0000a201-0000-1000-8000-00805f9b34fb';
-        const TUYA_WRITE_UUID = '0000a202-0000-1000-8000-00805f9b34fb';
-        const TUYA_NOTIFY_UUID = '0000a203-0000-1000-8000-00805f9b34fb';
+        // Tuya BLE Service UUIDs - Official Tuya registered UUIDs
+        // The primary service is 0xFD50 (registered with Bluetooth SIG)
+        const TUYA_SERVICE_UUID = '0000fd50-0000-1000-8000-00805f9b34fb';  // 0xFD50
+        const TUYA_WRITE_UUID = '00000001-0000-1001-8001-00805f9b07d0';   // Write characteristic
+        const TUYA_NOTIFY_UUID = '00000002-0000-1001-8001-00805f9b07d0';  // Notify characteristic
 
-        // Alternative: Custom service for simple config (we'll try both)
-        const CONFIG_SERVICE_UUID = '0000ff01-0000-1000-8000-00805f9b34fb';
-        const CONFIG_WRITE_UUID = '0000ff02-0000-1000-8000-00805f9b34fb';
-        const CONFIG_READ_UUID = '0000ff03-0000-1000-8000-00805f9b34fb';
+        // Alternative: Internal Tuya service (0xA201 - for some devices)
+        const TUYA_INTERNAL_SERVICE_UUID = '0000a201-0000-1000-8000-00805f9b34fb';
+        const TUYA_INTERNAL_WRITE_UUID = '0000a202-0000-1000-8000-00805f9b34fb';
+        const TUYA_INTERNAL_NOTIFY_UUID = '0000a203-0000-1000-8000-00805f9b34fb';
 
-        // Device name prefix to filter
-        const DEVICE_NAME_PREFIX = 'T5AI';
+        // Device credentials (from .env file)
+        // These are needed for Tuya BLE encrypted communication
+        const TUYA_UUID = 'uuid5449e77dcc3d02a9';
+        const TUYA_AUTHKEY = 'U8nUH1sauV1VodzRPnaPE0mLFAGYkbbm';
 
         // ===== State =====
         let device = null;
@@ -611,6 +642,8 @@
         let writeCharacteristic = null;
         let notifyCharacteristic = null;
         let currentTab = 'tcp';
+        let tuyaCrypto = null;  // TuyaBLECrypto instance
+        let receivedData = [];  // Buffer for received data
 
         // ===== Initialization =====
         document.addEventListener('DOMContentLoaded', () => {
@@ -653,7 +686,10 @@
                         { namePrefix: 'T5' },      // T5AI prefix
                         { name: 'BLE' },           // Generic BLE name (some devices use this)
                     ],
-                    optionalServices: [TUYA_SERVICE_UUID, CONFIG_SERVICE_UUID],
+                    optionalServices: [
+                        TUYA_SERVICE_UUID,           // 0xFD50 official
+                        TUYA_INTERNAL_SERVICE_UUID,  // 0xA201 internal
+                    ],
                 });
 
                 console.log('Device selected:', device.name);
@@ -665,33 +701,91 @@
                 console.log('Connected to GATT server');
 
                 // Try to get service and characteristics
+                // Try multiple service UUIDs in order: FD50 (official), A201 (internal)
+                let serviceFound = false;
+
+                // 1. Try official Tuya service (0xFD50)
                 try {
+                    console.log('Trying Tuya FD50 service...');
                     const service = await server.getPrimaryService(TUYA_SERVICE_UUID);
                     writeCharacteristic = await service.getCharacteristic(TUYA_WRITE_UUID);
                     notifyCharacteristic = await service.getCharacteristic(TUYA_NOTIFY_UUID);
 
-                    // Enable notifications
                     await notifyCharacteristic.startNotifications();
                     notifyCharacteristic.addEventListener('characteristicvaluechanged', handleNotification);
 
-                    console.log('Tuya BLE service connected');
+                    console.log('Tuya FD50 service connected!');
+                    serviceFound = true;
                 } catch (e) {
-                    console.log('Tuya service not found, trying config service...', e);
+                    console.log('FD50 service not found:', e.message);
+                }
 
+                // 2. Try internal Tuya service (0xA201)
+                if (!serviceFound) {
                     try {
-                        const service = await server.getPrimaryService(CONFIG_SERVICE_UUID);
-                        writeCharacteristic = await service.getCharacteristic(CONFIG_WRITE_UUID);
-                        const readChar = await service.getCharacteristic(CONFIG_READ_UUID);
+                        console.log('Trying Tuya A201 service...');
+                        const service = await server.getPrimaryService(TUYA_INTERNAL_SERVICE_UUID);
+                        writeCharacteristic = await service.getCharacteristic(TUYA_INTERNAL_WRITE_UUID);
+                        notifyCharacteristic = await service.getCharacteristic(TUYA_INTERNAL_NOTIFY_UUID);
 
-                        await readChar.startNotifications();
-                        readChar.addEventListener('characteristicvaluechanged', handleNotification);
-                        notifyCharacteristic = readChar;
+                        await notifyCharacteristic.startNotifications();
+                        notifyCharacteristic.addEventListener('characteristicvaluechanged', handleNotification);
 
-                        console.log('Config service connected');
-                    } catch (e2) {
-                        console.warn('No config service found, using device info only');
-                        showToast('⚠️', 'Connected but no config service. Use CLI instead.', 'error');
+                        console.log('Tuya A201 service connected!');
+                        serviceFound = true;
+                    } catch (e) {
+                        console.log('A201 service not found:', e.message);
                     }
+                }
+
+                // 3. List all available services
+                if (!serviceFound) {
+                    try {
+                        console.log('Listing all services...');
+                        const services = await server.getPrimaryServices();
+                        console.log('Available services:', services.map(s => s.uuid));
+
+                        // Try first available service with write characteristic
+                        for (const service of services) {
+                            try {
+                                const chars = await service.getCharacteristics();
+                                console.log('Service', service.uuid, 'characteristics:', chars.map(c => c.uuid));
+
+                                // Look for a writable characteristic
+                                for (const char of chars) {
+                                    if (char.properties.write || char.properties.writeWithoutResponse) {
+                                        writeCharacteristic = char;
+                                        console.log('Found writable characteristic:', char.uuid);
+                                    }
+                                    if (char.properties.notify) {
+                                        notifyCharacteristic = char;
+                                        await char.startNotifications();
+                                        char.addEventListener('characteristicvaluechanged', handleNotification);
+                                        console.log('Found notify characteristic:', char.uuid);
+                                    }
+                                }
+                                if (writeCharacteristic) {
+                                    serviceFound = true;
+                                    break;
+                                }
+                            } catch (e) {
+                                console.log('Error reading service:', e.message);
+                            }
+                        }
+                    } catch (e) {
+                        console.log('Could not list services:', e.message);
+                    }
+                }
+
+                // Initialize crypto if we found a service
+                if (serviceFound) {
+                    tuyaCrypto = new TuyaBLECrypto(TUYA_UUID, TUYA_AUTHKEY);
+                    console.log('Tuya crypto initialized');
+                    await sendDeviceInfoQuery();
+                    showToast('✅', 'BLE service connected!', 'success');
+                } else {
+                    console.warn('No suitable BLE service found');
+                    showToast('⚠️', 'Connected but no BLE service found. Check console for available services.', 'error');
                 }
 
                 // Update UI
@@ -702,8 +796,8 @@
 
                 showToast('✅', 'Connected to ' + device.name, 'success');
 
-                // Request initial status
-                setTimeout(() => refreshStatus(), 500);
+                // Request initial status after handshake
+                setTimeout(() => refreshStatus(), 1500);
 
             } catch (error) {
                 console.error('Connection error:', error);
@@ -711,7 +805,7 @@
 
                 // Provide helpful error messages
                 if (error.name === 'NotFoundError') {
-                    showToast('⚠️', 'No devices found. Make sure device is in pairing mode (not connected to WiFi/IoT).', 'error');
+                    showToast('⚠️', 'No devices found. Try "Scan All Devices" button.', 'error');
                 } else {
                     showToast('❌', 'Connection failed: ' + error.message, 'error');
                 }
@@ -719,6 +813,217 @@
 
             btn.disabled = false;
             btn.innerHTML = '<span>🔗</span> Connect to T5AI';
+        }
+
+        // Connect with no filters - shows ALL nearby Bluetooth devices
+        async function connectDeviceAll() {
+            const btn = document.getElementById('scanAllBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<div class="spinner"></div>';
+
+            updateConnectionStatus('connecting');
+
+            try {
+                // Request device - accepts ALL devices (no filtering)
+                device = await navigator.bluetooth.requestDevice({
+                    acceptAllDevices: true,
+                    optionalServices: [TUYA_SERVICE_UUID, TUYA_INTERNAL_SERVICE_UUID],
+                });
+
+                console.log('Device selected:', device.name, '| ID:', device.id);
+
+                // Connect to GATT server
+                device.addEventListener('gattserverdisconnected', onDisconnected);
+                server = await device.gatt.connect();
+
+                console.log('Connected to GATT server');
+
+                // Try to get Tuya service - try multiple UUIDs
+                let serviceFound = false;
+
+                // 1. Try FD50
+                try {
+                    console.log('Trying Tuya FD50 service...');
+                    const service = await server.getPrimaryService(TUYA_SERVICE_UUID);
+                    writeCharacteristic = await service.getCharacteristic(TUYA_WRITE_UUID);
+                    notifyCharacteristic = await service.getCharacteristic(TUYA_NOTIFY_UUID);
+                    await notifyCharacteristic.startNotifications();
+                    notifyCharacteristic.addEventListener('characteristicvaluechanged', handleNotification);
+                    console.log('Tuya FD50 service connected!');
+                    serviceFound = true;
+                } catch (e) {
+                    console.log('FD50 not found:', e.message);
+                }
+
+                // 2. Try A201
+                if (!serviceFound) {
+                    try {
+                        console.log('Trying Tuya A201 service...');
+                        const service = await server.getPrimaryService(TUYA_INTERNAL_SERVICE_UUID);
+                        writeCharacteristic = await service.getCharacteristic(TUYA_INTERNAL_WRITE_UUID);
+                        notifyCharacteristic = await service.getCharacteristic(TUYA_INTERNAL_NOTIFY_UUID);
+                        await notifyCharacteristic.startNotifications();
+                        notifyCharacteristic.addEventListener('characteristicvaluechanged', handleNotification);
+                        console.log('Tuya A201 service connected!');
+                        serviceFound = true;
+                    } catch (e) {
+                        console.log('A201 not found:', e.message);
+                    }
+                }
+
+                // 3. List and try all services
+                if (!serviceFound) {
+                    try {
+                        const services = await server.getPrimaryServices();
+                        console.log('Available services:', services.map(s => s.uuid));
+                        for (const service of services) {
+                            const chars = await service.getCharacteristics();
+                            console.log('Service', service.uuid, ':', chars.map(c => c.uuid + '(' + Object.keys(c.properties).filter(k => c.properties[k]).join(',') + ')'));
+                            for (const char of chars) {
+                                if ((char.properties.write || char.properties.writeWithoutResponse) && !writeCharacteristic) {
+                                    writeCharacteristic = char;
+                                }
+                                if (char.properties.notify && !notifyCharacteristic) {
+                                    notifyCharacteristic = char;
+                                    await char.startNotifications();
+                                    char.addEventListener('characteristicvaluechanged', handleNotification);
+                                }
+                            }
+                            if (writeCharacteristic) { serviceFound = true; break; }
+                        }
+                    } catch (e) {
+                        console.log('Service enumeration failed:', e.message);
+                    }
+                }
+
+                if (serviceFound) {
+                    tuyaCrypto = new TuyaBLECrypto(TUYA_UUID, TUYA_AUTHKEY);
+                    await sendDeviceInfoQuery();
+                    showToast('✅', 'BLE service connected!', 'success');
+                } else {
+                    showToast('⚠️', 'Connected but no writable characteristic found', 'error');
+                }
+
+                // Update UI
+                updateConnectionStatus('connected');
+                document.getElementById('configSection').classList.remove('hidden');
+                document.getElementById('connectBtn').classList.add('hidden');
+                document.getElementById('disconnectBtn').classList.remove('hidden');
+
+                showToast('✅', 'Connected to ' + device.name, 'success');
+
+            } catch (error) {
+                console.error('Connection error:', error);
+                updateConnectionStatus('disconnected');
+                showToast('❌', error.message, 'error');
+            }
+
+            btn.disabled = false;
+            btn.innerHTML = '<span>📡</span> Scan All Devices';
+        }
+
+        // Try to reconnect to a previously paired device
+        async function reconnectDevice() {
+            const btn = document.getElementById('reconnectBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<div class="spinner"></div>';
+
+            updateConnectionStatus('connecting');
+
+            try {
+                // Check if getDevices is available (Chrome 85+)
+                if (!navigator.bluetooth.getDevices) {
+                    throw new Error('Reconnect not supported in this browser. Use Chrome 85+.');
+                }
+
+                // Get previously paired devices
+                const devices = await navigator.bluetooth.getDevices();
+                console.log('Previously paired devices:', devices.length);
+
+                if (devices.length === 0) {
+                    throw new Error('No previously paired devices. Connect first using scan.');
+                }
+
+                // Try to connect to the first available device
+                let connected = false;
+                for (const d of devices) {
+                    console.log('Trying device:', d.name, d.id);
+
+                    try {
+                        // Watch for advertisements and connect
+                        const abortController = new AbortController();
+
+                        // Set timeout
+                        setTimeout(() => abortController.abort(), 10000);
+
+                        d.addEventListener('advertisementreceived', async (event) => {
+                            console.log('Advertisement received from:', event.device.name);
+                            abortController.abort();
+
+                            device = event.device;
+                            device.addEventListener('gattserverdisconnected', onDisconnected);
+                            server = await device.gatt.connect();
+                            connected = true;
+                        });
+
+                        await d.watchAdvertisements({ signal: abortController.signal }).catch(() => { });
+
+                        if (connected) break;
+                    } catch (e) {
+                        console.log('Failed to reconnect to', d.name, ':', e.message);
+                    }
+                }
+
+                if (!connected) {
+                    // Try direct connection without watching
+                    for (const d of devices) {
+                        try {
+                            device = d;
+                            device.addEventListener('gattserverdisconnected', onDisconnected);
+                            server = await device.gatt.connect();
+                            connected = true;
+                            break;
+                        } catch (e) {
+                            console.log('Direct connect failed for', d.name);
+                        }
+                    }
+                }
+
+                if (!connected) {
+                    throw new Error('Could not reconnect. Device may be out of range.');
+                }
+
+                // Try to get Tuya service
+                try {
+                    const service = await server.getPrimaryService(TUYA_SERVICE_UUID);
+                    writeCharacteristic = await service.getCharacteristic(TUYA_WRITE_UUID);
+                    notifyCharacteristic = await service.getCharacteristic(TUYA_NOTIFY_UUID);
+
+                    await notifyCharacteristic.startNotifications();
+                    notifyCharacteristic.addEventListener('characteristicvaluechanged', handleNotification);
+
+                    tuyaCrypto = new TuyaBLECrypto(TUYA_UUID, TUYA_AUTHKEY);
+                    await sendDeviceInfoQuery();
+                } catch (e) {
+                    console.log('Tuya service not found:', e.message);
+                }
+
+                // Update UI
+                updateConnectionStatus('connected');
+                document.getElementById('configSection').classList.remove('hidden');
+                document.getElementById('connectBtn').classList.add('hidden');
+                document.getElementById('disconnectBtn').classList.remove('hidden');
+
+                showToast('✅', 'Reconnected to ' + device.name, 'success');
+
+            } catch (error) {
+                console.error('Reconnect error:', error);
+                updateConnectionStatus('disconnected');
+                showToast('⚠️', error.message, 'error');
+            }
+
+            btn.disabled = false;
+            btn.innerHTML = '<span>🔄</span> Reconnect Last';
         }
 
         function disconnectDevice() {
@@ -762,21 +1067,154 @@
             }
         }
 
+        // ===== BLE Log =====
+        function addBleLog(msg, type = 'info') {
+            const log = document.getElementById('bleLog');
+            const colors = { info: '#0f0', error: '#f55', warn: '#ff0', recv: '#0ff' };
+            const time = new Date().toLocaleTimeString();
+            const div = document.createElement('div');
+            div.style.color = colors[type] || '#0f0';
+            div.textContent = `[${time}] ${msg}`;
+            log.appendChild(div);
+            log.scrollTop = log.scrollHeight;
+        }
+
+        function clearBleLog() {
+            document.getElementById('bleLog').innerHTML = '<div>Log cleared</div>';
+        }
+
         // ===== Data Handling =====
-        function handleNotification(event) {
+        async function handleNotification(event) {
             const value = event.target.value;
             const data = new Uint8Array(value.buffer);
-            const text = new TextDecoder().decode(data);
 
-            console.log('Received:', text);
+            const hexStr = Array.from(data).map(b => b.toString(16).padStart(2, '0')).join(' ');
+            console.log('Received raw:', hexStr);
+            addBleLog(`RX (${data.length} bytes): ${hexStr.substring(0, 60)}...`, 'recv');
+
+            // If we have crypto, try to decrypt
+            if (tuyaCrypto && data.length > 17) {
+                try {
+                    // Decode BLE framing first
+                    const deframedData = deframeBLEPacket(data);
+                    if (deframedData) {
+                        const decrypted = await tuyaCrypto.decryptPacket(deframedData);
+                        console.log('Decrypted:', Array.from(decrypted).map(b => b.toString(16).padStart(2, '0')).join(' '));
+
+                        const parsed = tuyaCrypto.parsePacket(decrypted);
+                        console.log('Parsed packet:', parsed);
+                        handleTuyaResponse(parsed);
+                    }
+                } catch (e) {
+                    console.log('Decrypt failed, trying plain text:', e);
+                    handlePlainResponse(data);
+                }
+            } else {
+                handlePlainResponse(data);
+            }
+        }
+
+        // Deframe BLE packet (reverse of encodeForTransmission)
+        function deframeBLEPacket(data) {
+            if (data.length < 3) return null;
+
+            let offset = 0;
+
+            // Read subpackage number (varint)
+            let subpkgNum = 0;
+            let multiplier = 1;
+            while (offset < 4) {
+                const byte = data[offset++];
+                subpkgNum += (byte & 0x7F) * multiplier;
+                multiplier *= 128;
+                if ((byte & 0x80) === 0) break;
+            }
+
+            // If first packet, read total length
+            if (subpkgNum === 0) {
+                let totalLen = 0;
+                multiplier = 1;
+                while (offset < data.length && offset < 8) {
+                    const byte = data[offset++];
+                    totalLen += (byte & 0x7F) * multiplier;
+                    multiplier *= 128;
+                    if ((byte & 0x80) === 0) break;
+                }
+
+                // Version and sequence byte
+                offset++;
+            }
+
+            // Return the payload data
+            return data.slice(offset);
+        }
+
+        function handlePlainResponse(data) {
+            const text = new TextDecoder().decode(data);
+            console.log('Received text:', text);
 
             try {
                 const response = JSON.parse(text);
                 handleResponse(response);
             } catch (e) {
-                // Plain text response
                 handleTextResponse(text);
             }
+        }
+
+        function handleTuyaResponse(parsed) {
+            const { cmdType, payload } = parsed;
+
+            console.log('Tuya CMD:', '0x' + cmdType.toString(16).padStart(4, '0'));
+
+            // FRM_QRY_DEV_INFO_REQ response
+            if (cmdType === 0x0000) {
+                console.log('Device info response received');
+                showToast('✅', 'Device info received', 'success');
+            }
+            // FRM_PAIR_REQ response
+            else if (cmdType === 0x0001) {
+                console.log('Pairing response');
+                // Extract pair random if present
+                if (payload.length >= 6) {
+                    tuyaCrypto.setPairRandom(payload.slice(0, 6));
+                    console.log('Pair random set');
+                }
+            }
+            // FRM_STAT_REPORT (DP status)
+            else if (cmdType === 0x8001 || cmdType === 0x8006) {
+                console.log('DP Status report');
+                parseDPData(payload);
+            }
+            // FRM_DOWNLINK_TRANSPARENT response
+            else if (cmdType === 0x801B || cmdType === 0x801C) {
+                console.log('Transparent data response, payload length:', payload.length);
+                try {
+                    // Format: flags(2) + channel(2) + json_data
+                    // Skip 4 bytes header
+                    const jsonStr = new TextDecoder().decode(payload.slice(4));
+                    console.log('JSON string:', jsonStr);
+                    const response = JSON.parse(jsonStr);
+                    handleResponse(response);
+                } catch (e) {
+                    console.log('Failed to parse transparent data:', e);
+                    // Try without header skip (legacy format)
+                    try {
+                        const jsonStr = new TextDecoder().decode(payload);
+                        const response = JSON.parse(jsonStr);
+                        handleResponse(response);
+                    } catch (e2) {
+                        console.log('Also failed legacy parse:', e2);
+                    }
+                }
+            }
+            else {
+                console.log('Unknown command type:', cmdType);
+            }
+        }
+
+        function parseDPData(payload) {
+            // DP format varies, just log for now
+            console.log('DP Data:', payload);
         }
 
         function handleResponse(response) {
@@ -784,7 +1222,7 @@
 
             if (response.type === 'status') {
                 updateStatusDisplay(response);
-            } else if (response.type === 'wifi_scan') {
+            } else if (response.type === 'wifi_list') {
                 displayWifiList(response.networks || []);
             } else if (response.type === 'ack') {
                 showToast('✅', response.message || 'Command successful', 'success');
@@ -801,12 +1239,103 @@
             }
         }
 
+        // Send device info query (initiates handshake)
+        async function sendDeviceInfoQuery() {
+            if (!writeCharacteristic || !tuyaCrypto) {
+                console.log('Not ready to send device query');
+                return;
+            }
+
+            try {
+                // Build device info query command (CMD 0x0000)
+                const packet = tuyaCrypto.createDeviceInfoQuery();
+
+                // For unencrypted mode 0: prepend mode byte to packet data
+                // Format: mode(1) + packet_data(N)
+                const withMode = new Uint8Array(1 + packet.length);
+                withMode[0] = 0;  // Mode 0 = no encryption
+                withMode.set(packet, 1);
+
+                // Now frame the whole thing (mode + packet)
+                const framedPacket = tuyaCrypto.encodeForTransmission(withMode);
+
+                console.log('Sending device query:', Array.from(framedPacket).map(b => b.toString(16).padStart(2, '0')).join(' '));
+                await writeCharacteristic.writeValue(framedPacket);
+
+                console.log('Device info query sent');
+            } catch (error) {
+                console.error('Failed to send device query:', error);
+            }
+        }
+
+        // Send encrypted command
+        async function sendTuyaCommand(cmdType, data) {
+            if (!writeCharacteristic || !tuyaCrypto) {
+                showToast('❌', 'Not connected to device', 'error');
+                return false;
+            }
+
+            try {
+                // Build packet
+                const packet = tuyaCrypto.buildPacket(cmdType, data);
+
+                // Encrypt with mode 11 (initial auth)
+                const encrypted = await tuyaCrypto.encryptPacket(packet, 11);
+
+                // Frame for transmission
+                const framed = tuyaCrypto.encodeForTransmission(encrypted);
+
+                console.log('Sending encrypted:', Array.from(framed).map(b => b.toString(16).padStart(2, '0')).join(' '));
+                await writeCharacteristic.writeValue(framed);
+
+                return true;
+            } catch (error) {
+                console.error('Send error:', error);
+                showToast('❌', 'Failed to send command', 'error');
+                return false;
+            }
+        }
+
+        // Send plain JSON command (fallback for simple config service)
         async function sendCommand(cmd) {
             if (!writeCharacteristic) {
                 showToast('❌', 'Not connected to device', 'error');
                 return false;
             }
 
+            // If we have Tuya crypto, use transparent data channel
+            if (tuyaCrypto) {
+                try {
+                    // Determine channel type based on command
+                    // Channel 1 = BLE_CHANNLE_NETCFG (for WiFi config)
+                    // Channel 0 = Custom config channel (for TCP settings, status, etc.)
+                    let channelType = 0;  // Default to custom channel
+                    
+                    if (cmd.cmd === 'set_wifi' && cmd.ssid) {
+                        // Use NETCFG channel for WiFi - format: {ssid, pwd, token}
+                        channelType = 1;  // BLE_CHANNLE_NETCFG
+                        cmd = {
+                            ssid: cmd.ssid,
+                            pwd: cmd.password || '',
+                            token: 'webble'  // Required by netcfg handler
+                        };
+                    }
+                    
+                    const packet = tuyaCrypto.createTransparentDataCmd(channelType, cmd);
+                    // Use mode 0 (unencrypted) since we haven't completed handshake yet
+                    const withMode = await tuyaCrypto.encryptPacket(packet, 0);
+                    const framed = tuyaCrypto.encodeForTransmission(withMode);
+
+                    console.log(`Sending via Tuya protocol (channel ${channelType}, mode 0):`, 
+                        Array.from(framed).map(b => b.toString(16).padStart(2, '0')).join(' '));
+                    await writeCharacteristic.writeValue(framed);
+                    return true;
+                } catch (error) {
+                    console.error('Tuya send failed:', error);
+                }
+            }
+
+            // Fallback to plain JSON
             try {
                 const encoder = new TextEncoder();
                 const data = encoder.encode(JSON.stringify(cmd));
@@ -853,8 +1382,21 @@
 
             setTimeout(() => {
                 btn.disabled = false;
-                btn.innerHTML = '<span>🔍</span> Scan WiFi Networks';
+                btn.innerHTML = '<span>🔍</span> Scan WiFi';
             }, 3000);
+        }
+
+        async function disconnectWifi() {
+            const btn = document.getElementById('disconnectWifiBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<div class="spinner"></div> Disconnecting...';
+
+            await sendCommand({ cmd: 'wifi_disconnect' });
+
+            setTimeout(() => {
+                btn.disabled = false;
+                btn.innerHTML = '<span>📴</span> Disconnect WiFi';
+            }, 2000);
         }
 
         function displayWifiList(networks) {
