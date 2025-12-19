@@ -490,10 +490,28 @@
                         <div class="icon">🔇</div>
                         <div>STOP AUDIO</div>
                     </button>
+                    <button class="command-btn" id="btn-mic-on" onclick="toggleMic(true)"
+                        style="border-color: rgba(16, 185, 129, 0.5);">
+                        <div class="icon">🎤</div>
+                        <div>MIC ON</div>
+                    </button>
+                    <button class="command-btn" id="btn-mic-off" onclick="toggleMic(false)"
+                        style="border-color: rgba(239, 68, 68, 0.5);">
+                        <div class="icon">🔴</div>
+                        <div>MIC OFF</div>
+                    </button>
                     <button class="command-btn" onclick="sendQuickCommand('mem')">
                         <div class="icon">💾</div>
                         <div>MEMORY</div>
                     </button>
+                </div>
+                <!-- Mic streaming status -->
+                <div id="mic-status"
+                    style="margin-top: 1rem; padding: 0.75rem; background: rgba(0,0,0,0.3); border-radius: 8px; font-size: 0.85rem; display: none;">
+                    <span style="color: var(--accent-green);">🎤 Microphone streaming:</span>
+                    <span id="mic-status-text">Inactive</span>
+                    <span style="margin-left: 1rem; color: var(--text-secondary);">Received: <span
+                            id="mic-bytes-received">0</span> bytes</span>
                 </div>
             </div>
 
@@ -539,6 +557,14 @@
         let msgCount = 0;
         let authToken = null;
 
+        // Microphone streaming state
+        let micStreaming = false;
+        let audioContext = null;
+        let audioQueue = [];
+        let isPlayingAudio = false;
+        let totalBytesReceived = 0;
+        let pendingAudioHeader = null;
+
         // WebSocket URL - use same origin, same port (WebSocket is on same port as HTTP)
         // Automatically use wss:// for HTTPS, ws:// for HTTP
         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -576,10 +602,36 @@
             };
 
             ws.onmessage = (event) => {
+                // Handle binary data (audio)
+                if (event.data instanceof Blob) {
+                    event.data.arrayBuffer().then(buffer => {
+                        handleBinaryData(new Uint8Array(buffer));
+                    });
+                    return;
+                }
+
+                // Handle text/JSON data
                 try {
-                    const data = JSON.parse(event.data);
+                    // Check if this is an audio header
+                    const text = event.data;
+                    if (text.includes('"type":"audio_data"')) {
+                        const endOfJson = text.indexOf('\n');
+                        if (endOfJson > 0) {
+                            pendingAudioHeader = JSON.parse(text.substring(0, endOfJson));
+                        } else {
+                            pendingAudioHeader = JSON.parse(text);
+                        }
+                        return;
+                    }
+
+                    const data = JSON.parse(text);
                     handleMessage(data);
                 } catch (err) {
+                    // Could be binary audio data after header
+                    if (pendingAudioHeader && event.data instanceof ArrayBuffer) {
+                        handleAudioData(new Uint8Array(event.data));
+                        return;
+                    }
                     log('error', `Parse error: ${err.message}`);
                 }
             };
@@ -745,6 +797,138 @@
                 await fetch('/api/logout', { method: 'POST' });
             } catch (e) { }
             window.location.href = '/login.html';
+        }
+
+        // ==================== Microphone Streaming Functions ====================
+
+        function toggleMic(on) {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                log('error', 'WebSocket not connected');
+                return;
+            }
+
+            const cmd = on ? 'mic on' : 'mic off';
+            ws.send(JSON.stringify({
+                type: 'send_to_devkit',
+                data: cmd
+            }));
+
+            if (on) {
+                // Initialize audio context on user interaction (required by browsers)
+                initAudioContext();
+                micStreaming = true;
+                updateMicUI(true);
+                log('info', '🎤 Enabling microphone streaming...');
+            } else {
+                micStreaming = false;
+                updateMicUI(false);
+                log('info', '🔴 Stopping microphone streaming...');
+            }
+        }
+
+        function initAudioContext() {
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                    sampleRate: 8000  // Match DevKit sample rate
+                });
+                log('info', `Audio context initialized (sample rate: ${audioContext.sampleRate}Hz)`);
+            }
+
+            // Resume context if suspended (browser autoplay policy)
+            if (audioContext.state === 'suspended') {
+                audioContext.resume();
+            }
+        }
+
+        function handleBinaryData(data) {
+            if (!micStreaming || !pendingAudioHeader || pendingAudioHeader.type !== 'audio_data') {
+                return;
+            }
+
+            // Process audio data
+            handleAudioData(data);
+            pendingAudioHeader = null;
+        }
+
+        function handleAudioData(audioBytes) {
+            if (!audioContext || !micStreaming) {
+                return;
+            }
+
+            totalBytesReceived += audioBytes.length;
+            updateMicBytesUI();
+
+            // Convert PCM 16-bit to Float32 for Web Audio API
+            const samples = new Int16Array(audioBytes.buffer);
+            const floatSamples = new Float32Array(samples.length);
+
+            for (let i = 0; i < samples.length; i++) {
+                floatSamples[i] = samples[i] / 32768.0;  // Normalize to -1.0 to 1.0
+            }
+
+            // Create audio buffer and queue for playback
+            const audioBuffer = audioContext.createBuffer(1, floatSamples.length, 8000);
+            audioBuffer.getChannelData(0).set(floatSamples);
+
+            audioQueue.push(audioBuffer);
+
+            // Start playing if not already
+            if (!isPlayingAudio) {
+                playNextAudioChunk();
+            }
+        }
+
+        function playNextAudioChunk() {
+            if (audioQueue.length === 0) {
+                isPlayingAudio = false;
+                return;
+            }
+
+            isPlayingAudio = true;
+            const buffer = audioQueue.shift();
+
+            const source = audioContext.createBufferSource();
+            source.buffer = buffer;
+            source.connect(audioContext.destination);
+            source.onended = playNextAudioChunk;
+            source.start();
+        }
+
+        function updateMicUI(active) {
+            const statusDiv = document.getElementById('mic-status');
+            const statusText = document.getElementById('mic-status-text');
+            const btnMicOn = document.getElementById('btn-mic-on');
+            const btnMicOff = document.getElementById('btn-mic-off');
+
+            if (active) {
+                statusDiv.style.display = 'block';
+                statusText.textContent = 'Active';
+                statusText.style.color = 'var(--accent-green)';
+                btnMicOn.style.background = 'rgba(16, 185, 129, 0.2)';
+                btnMicOff.style.background = '';
+            } else {
+                statusText.textContent = 'Inactive';
+                statusText.style.color = 'var(--text-secondary)';
+                btnMicOn.style.background = '';
+                btnMicOff.style.background = 'rgba(239, 68, 68, 0.2)';
+
+                // Clear audio queue
+                audioQueue = [];
+                isPlayingAudio = false;
+            }
+        }
+
+        function updateMicBytesUI() {
+            const el = document.getElementById('mic-bytes-received');
+            if (el) {
+                if (totalBytesReceived > 1024 * 1024) {
+                    el.textContent = (totalBytesReceived / (1024 * 1024)).toFixed(2) + ' MB';
+                } else if (totalBytesReceived > 1024) {
+                    el.textContent = (totalBytesReceived / 1024).toFixed(1) + ' KB';
+                } else {
+                    el.textContent = totalBytesReceived;
+                }
+            }
         }
 
         // Initial connection

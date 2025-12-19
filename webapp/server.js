@@ -183,58 +183,74 @@ const tcpServer = net.createServer((socket) => {
         while (buffer.length >= 4) {
             const msgLen = buffer.readUInt32LE(0);
 
-            if (buffer.length >= 4 + msgLen) {
-                const message = buffer.slice(4, 4 + msgLen).toString('utf8');
-                buffer = buffer.slice(4 + msgLen);
-
-                // Check for auth message
-                if (!devkitAuthenticated) {
-                    if (message.startsWith('auth:')) {
-                        const token = message.substring(5);
-                        if (token === AUTH_TOKEN) {
-                            devkitAuthenticated = true;
-                            console.log(`[TCP] DevKit authenticated: ${clientInfo}`);
-                            sendToDevKitRaw('auth:ok');
-
-                            // Start keep-alive ping
-                            startKeepAlive();
-
-                            broadcastToWeb({
-                                type: 'devkit_status',
-                                connected: true,
-                                authenticated: true,
-                                address: socket.remoteAddress,
-                                timestamp: new Date().toISOString()
-                            });
-                        } else {
-                            console.log(`[TCP] DevKit auth failed: ${clientInfo}`);
-                            sendToDevKitRaw('auth:failed');
-                            socket.destroy();
-                        }
-                    } else {
-                        console.log(`[TCP] DevKit not authenticated, ignoring: ${message}`);
-                        sendToDevKitRaw('auth:required');
-                    }
-                    continue;
-                }
-
-                console.log(`[TCP] Received from DevKit: ${message}`);
-
-                // Handle pong responses silently (don't broadcast to web clients)
-                if (message === 'pong') {
-                    console.log(`[TCP] Keep-alive pong received`);
-                    continue;
-                }
-
-                // Forward to web clients
-                broadcastToWeb({
-                    type: 'devkit_message',
-                    data: message,
-                    timestamp: new Date().toISOString()
-                });
-            } else {
+            if (buffer.length < 4 + msgLen) {
                 break; // Wait for more data
             }
+
+            // Check for audio data (binary with 'audio:' prefix)
+            // Format: "audio:" (6 bytes) + binary PCM data
+            const rawMessage = buffer.slice(4, 4 + msgLen);
+            buffer = buffer.slice(4 + msgLen);
+
+            // Check for auth message (only ASCII auth: prefix matters)
+            if (!devkitAuthenticated) {
+                const message = rawMessage.toString('utf8');
+                if (message.startsWith('auth:')) {
+                    const token = message.substring(5);
+                    if (token === AUTH_TOKEN) {
+                        devkitAuthenticated = true;
+                        console.log(`[TCP] DevKit authenticated: ${clientInfo}`);
+                        sendToDevKitRaw('auth:ok');
+
+                        // Start keep-alive ping
+                        startKeepAlive();
+
+                        broadcastToWeb({
+                            type: 'devkit_status',
+                            connected: true,
+                            authenticated: true,
+                            address: socket.remoteAddress,
+                            timestamp: new Date().toISOString()
+                        });
+                    } else {
+                        console.log(`[TCP] DevKit auth failed: ${clientInfo}`);
+                        sendToDevKitRaw('auth:failed');
+                        socket.destroy();
+                    }
+                } else {
+                    console.log(`[TCP] DevKit not authenticated, ignoring: ${message}`);
+                    sendToDevKitRaw('auth:required');
+                }
+                continue;
+            }
+
+            // Check if this is audio data (binary with 'audio:' prefix)
+            const audioPrefix = Buffer.from('audio:');
+            if (rawMessage.length > 6 && rawMessage.slice(0, 6).equals(audioPrefix)) {
+                // Extract audio payload (after the 'audio:' prefix)
+                const audioData = rawMessage.slice(6);
+
+                // Forward audio data to web clients as binary
+                broadcastAudioToWeb(audioData);
+                continue;
+            }
+
+            // Regular text message
+            const message = rawMessage.toString('utf8');
+            console.log(`[TCP] Received from DevKit: ${message}`);
+
+            // Handle pong responses silently (don't broadcast to web clients)
+            if (message === 'pong') {
+                console.log(`[TCP] Keep-alive pong received`);
+                continue;
+            }
+
+            // Forward to web clients as JSON
+            broadcastToWeb({
+                type: 'devkit_message',
+                data: message,
+                timestamp: new Date().toISOString()
+            });
         }
     });
 
@@ -367,6 +383,30 @@ function broadcastToWeb(data) {
     webClients.forEach((state, client) => {
         if (client.readyState === 1 && state.authenticated) { // OPEN and authenticated
             client.send(message);
+        }
+    });
+}
+
+/**
+ * Broadcast binary audio data to all authenticated web clients
+ * Audio format: PCM 16-bit, 8000Hz, mono
+ */
+function broadcastAudioToWeb(audioData) {
+    // Create a message header to identify this as audio data
+    const header = Buffer.from(JSON.stringify({
+        type: 'audio_data',
+        sampleRate: 8000,
+        channels: 1,
+        bitsPerSample: 16,
+        length: audioData.length
+    }) + '\n');
+
+    webClients.forEach((state, client) => {
+        if (client.readyState === 1 && state.authenticated) {
+            // Send as binary data with JSON header
+            // First send the header, then the binary audio data
+            client.send(header);
+            client.send(audioData);
         }
     });
 }

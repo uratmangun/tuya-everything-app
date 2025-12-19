@@ -139,6 +139,11 @@ static void tcp_receiver_task(void *arg)
             
             /* Timeout or would-block is normal, just continue */
             if (err == UNW_ETIMEDOUT || err == UNW_EAGAIN || err == UNW_EWOULDBLOCK || err == 0) {
+                /* Debug: Log occasionally to confirm loop is running */
+                static int timeout_count = 0;
+                if (++timeout_count % 100 == 0) {
+                    PR_DEBUG("TCP recv timeout (count=%d)", timeout_count);
+                }
                 continue;
             }
             
@@ -163,8 +168,12 @@ static void tcp_receiver_task(void *arg)
             continue;
         }
         
+        PR_DEBUG("TCP recv header: len=%d, bytes: %02X %02X %02X %02X", 
+                 recv_len, header[0], header[1], header[2], header[3]);
+        
         if (recv_len < 4) {
             /* Incomplete header, wait for more data */
+            PR_WARN("Incomplete header received: %d bytes", recv_len);
             continue;
         }
         
@@ -176,11 +185,13 @@ static void tcp_receiver_task(void *arg)
             continue;
         }
         
+        PR_DEBUG("TCP expecting %u bytes of message body", msg_len);
+        
         /* Read message body */
         recv_len = tal_net_recv(g_ctx.socket_fd, g_ctx.recv_buf, msg_len);
         
         if (recv_len <= 0) {
-            PR_WARN("Failed to read message body");
+            PR_WARN("Failed to read message body (recv_len=%d)", recv_len);
             disconnect_from_server();
             continue;
         }

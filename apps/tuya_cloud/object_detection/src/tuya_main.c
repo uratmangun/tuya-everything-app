@@ -51,6 +51,9 @@
 /* BLE configuration for Web Bluetooth */
 #include "ble_config.h"
 
+/* Microphone streaming for web app */
+#include "mic_streaming.h"
+
 /* Switch DP ID - typically DP 1 for switch products */
 #define SWITCH_DP_ID         1
 /* Volume DP ID - DP 3 for volume control */
@@ -113,13 +116,20 @@ static void tcp_message_callback(const char *data, uint32_t len)
     if (strncmp(data, "ping", 4) == 0) {
         tcp_client_send_str("pong");
     }
+    else if (strncmp(data, "test", 4) == 0) {
+        /* Simple test command to verify callback works */
+        tcp_client_send_str("ok:test_received");
+    }
     else if (strncmp(data, "status", 6) == 0) {
+        /* Simplified status response */
+        int heap = tal_system_get_free_heap_size();
         snprintf(response, sizeof(response), 
-            "{\"detection\":%s,\"volume\":%d,\"audio_init\":%s,\"heap\":%d}",
+            "{\"detection\":%s,\"volume\":%d,\"audio_init\":%s,\"mic_streaming\":%s,\"heap\":%d}",
             g_detection_active ? "true" : "false",
             g_current_volume,
             g_audio_initialized ? "true" : "false",
-            tal_system_get_free_heap_size());
+            mic_streaming_is_active() ? "true" : "false",
+            heap);
         tcp_client_send_str(response);
     }
     else if (strncmp(data, "audio play", 10) == 0) {
@@ -142,6 +152,39 @@ static void tcp_message_callback(const char *data, uint32_t len)
             ai_audio_player_stop();
         }
         tcp_client_send_str("ok:audio_stopped");
+    }
+    else if (strncmp(data, "mic on", 6) == 0) {
+        /* Start microphone streaming to web app */
+        if (mic_streaming_is_active()) {
+            tcp_client_send_str("ok:mic_already_on");
+        } else {
+            OPERATE_RET rt = mic_streaming_start();
+            if (rt == OPRT_OK) {
+                tcp_client_send_str("ok:mic_on");
+            } else {
+                snprintf(response, sizeof(response), "error:mic_start_failed:%d", rt);
+                tcp_client_send_str(response);
+            }
+        }
+    }
+    else if (strncmp(data, "mic off", 7) == 0) {
+        /* Stop microphone streaming */
+        if (!mic_streaming_is_active()) {
+            tcp_client_send_str("ok:mic_already_off");
+        } else {
+            mic_streaming_stop();
+            tcp_client_send_str("ok:mic_off");
+        }
+    }
+    else if (strncmp(data, "mic status", 10) == 0) {
+        /* Get mic streaming status */
+        uint32_t bytes_sent = 0, frames_sent = 0;
+        mic_streaming_get_stats(&bytes_sent, &frames_sent);
+        snprintf(response, sizeof(response), 
+            "{\"active\":%s,\"bytes_sent\":%u,\"frames_sent\":%u}",
+            mic_streaming_is_active() ? "true" : "false",
+            bytes_sent, frames_sent);
+        tcp_client_send_str(response);
     }
     else if (strncmp(data, "switch on", 9) == 0) {
         g_detection_active = true;
@@ -545,6 +588,15 @@ void user_main(void)
                 }
             }
         }
+    }
+
+    /* Initialize microphone streaming (for web app audio) */
+    PR_INFO("Initializing microphone streaming...");
+    rt = mic_streaming_init();
+    if (rt != OPRT_OK) {
+        PR_ERR("Failed to initialize mic streaming: %d", rt);
+    } else {
+        PR_INFO("Microphone streaming initialized (standby mode)");
     }
 
 #if !defined(PLATFORM_UBUNTU) || (PLATFORM_UBUNTU == 0)
