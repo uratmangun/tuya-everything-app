@@ -18,7 +18,7 @@
 ***********************************************************/
 #define TCP_RECV_BUF_SIZE       2048
 #define TCP_RECONNECT_DELAY_MS  5000
-#define TCP_RECV_TIMEOUT_MS     100
+#define TCP_RECV_TIMEOUT_MS     5000   /* 5 seconds - long enough to not spam, short enough to detect disconnect */
 
 /***********************************************************
 ***********************typedef define***********************
@@ -134,9 +134,11 @@ static void tcp_receiver_task(void *arg)
         recv_len = tal_net_recv(g_ctx.socket_fd, header, 4);
         
         if (recv_len < 0) {
-            /* Timeout is normal, just continue */
+            /* Check specific error */
             int err = tal_net_get_errno();
-            if (err == UNW_ETIMEDOUT || err == UNW_EAGAIN) {
+            
+            /* Timeout or would-block is normal, just continue */
+            if (err == UNW_ETIMEDOUT || err == UNW_EAGAIN || err == UNW_EWOULDBLOCK || err == 0) {
                 continue;
             }
             
@@ -147,8 +149,16 @@ static void tcp_receiver_task(void *arg)
         }
         
         if (recv_len == 0) {
-            /* Connection closed by server */
-            PR_WARN("Server closed connection, reconnecting...");
+            /* recv_len == 0 can mean:
+             * 1. Connection closed by peer (real disconnect)
+             * 2. No data available yet (some systems)
+             * We check socket state to be sure */
+            int err = tal_net_get_errno();
+            if (err == UNW_ETIMEDOUT || err == UNW_EAGAIN || err == UNW_EWOULDBLOCK || err == 0) {
+                /* Not a real disconnect, just no data */
+                continue;
+            }
+            PR_WARN("Server closed connection (recv=0, errno=%d), reconnecting...", err);
             disconnect_from_server();
             continue;
         }
