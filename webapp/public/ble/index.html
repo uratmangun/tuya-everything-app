@@ -64,6 +64,28 @@
             font-size: 14px;
         }
 
+        .nav-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 12px;
+            padding: 8px 16px;
+            background: rgba(14, 165, 233, 0.1);
+            border: 1px solid rgba(14, 165, 233, 0.3);
+            border-radius: 8px;
+            color: var(--accent);
+            text-decoration: none;
+            font-size: 14px;
+            font-weight: 500;
+            transition: all 0.2s ease;
+        }
+
+        .nav-link:hover {
+            background: rgba(14, 165, 233, 0.2);
+            border-color: rgba(14, 165, 233, 0.5);
+            transform: translateY(-1px);
+        }
+
         .card {
             background: var(--bg-card);
             border: 1px solid var(--border-color);
@@ -416,6 +438,12 @@
         <div class="header">
             <h1>⚙️ T5AI Configuration</h1>
             <p>Configure your DevKit via Bluetooth</p>
+            <div style="display: flex; gap: 12px; justify-content: center; flex-wrap: wrap;">
+                <a href="/" class="nav-link">🏠 Back to Home</a>
+                <a href="#" class="nav-link" onclick="logout(); return false;"
+                    style="background: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.3); color: #ef4444;">🚪
+                    Logout</a>
+            </div>
         </div>
 
         <!-- Not Supported Message -->
@@ -1775,6 +1803,13 @@
             setTimeout(() => {
                 toast.classList.remove('show');
             }, 3000);
+        }
+
+        async function logout() {
+            try {
+                await fetch('/api/logout', { method: 'POST' });
+            } catch (e) { }
+            window.location.href = '/login.html';
         }
     </script>
 </body>

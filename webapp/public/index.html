@@ -69,6 +69,28 @@
             font-size: 0.95rem;
         }
 
+        .nav-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 12px;
+            padding: 8px 16px;
+            background: rgba(6, 182, 212, 0.1);
+            border: 1px solid rgba(6, 182, 212, 0.3);
+            border-radius: 8px;
+            color: var(--accent-cyan);
+            text-decoration: none;
+            font-size: 0.9rem;
+            font-weight: 500;
+            transition: all 0.2s ease;
+        }
+
+        .nav-link:hover {
+            background: rgba(6, 182, 212, 0.2);
+            border-color: rgba(6, 182, 212, 0.5);
+            transform: translateY(-1px);
+        }
+
         .grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -406,6 +428,12 @@
         <header>
             <h1>🎛️ T5AI DevKit Controller</h1>
             <p>Real-time communication between Web UI and DevKit</p>
+            <div style="display: flex; gap: 12px; justify-content: center; flex-wrap: wrap;">
+                <a href="/ble" class="nav-link">📶 BLE Configuration</a>
+                <a href="#" class="nav-link" onclick="logout(); return false;"
+                    style="background: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.3); color: #ef4444;">🚪
+                    Logout</a>
+            </div>
         </header>
 
         <div class="grid">
@@ -440,18 +468,6 @@
                         </div>
                     </div>
                 </div>
-            </div>
-
-            <!-- Send Message Card -->
-            <div class="card">
-                <h2><span>📤</span> Send to DevKit</h2>
-                <div class="input-group">
-                    <label for="message">Message</label>
-                    <textarea id="message" placeholder="Enter message to send to DevKit..."></textarea>
-                </div>
-                <button id="send-btn" class="btn btn-primary" onclick="sendMessage()">
-                    <span>📨</span> Send Message
-                </button>
             </div>
 
             <!-- Quick Commands -->
@@ -724,13 +740,12 @@
             setTimeout(connect, 500);
         }
 
-        // Handle Enter key in textarea
-        document.getElementById('message').addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                sendMessage();
-            }
-        });
+        async function logout() {
+            try {
+                await fetch('/api/logout', { method: 'POST' });
+            } catch (e) { }
+            window.location.href = '/login.html';
+        }
 
         // Initial connection
         connect();

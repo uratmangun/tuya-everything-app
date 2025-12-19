@@ -6,7 +6,7 @@
  * 2. HTTP + WebSocket Server (port 3000) - Serves web UI and WebSocket on same port
  * 
  * Security:
- * - HTTP Basic Auth for web UI
+ * - Session-based auth with login page for web UI
  * - Token-based auth for WebSocket and TCP
  */
 
@@ -15,11 +15,13 @@ const { WebSocketServer } = require('ws');
 const net = require('net');
 const path = require('path');
 const http = require('http');
+const crypto = require('crypto');
 
 // Load environment variables
 const AUTH_USERNAME = process.env.AUTH_USERNAME || 'admin';
 const AUTH_PASSWORD = process.env.AUTH_PASSWORD || 'changeme123';
 const AUTH_TOKEN = process.env.AUTH_TOKEN || 'devkit-secret-token';
+const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 
 // Configuration
 const HTTP_PORT = process.env.HTTP_PORT || 3000;
@@ -35,6 +37,11 @@ const server = http.createServer(app);
 let devkitSocket = null;
 let devkitAuthenticated = false;
 let webClients = new Map(); // ws -> { authenticated: bool }
+let keepAliveInterval = null; // Keep-alive ping interval
+const KEEPALIVE_INTERVAL_MS = 60000; // 60 seconds
+
+// Simple session store (in-memory)
+const sessions = new Map();
 
 // Get local IP address
 const os = require('os');
@@ -52,42 +59,103 @@ function getLocalIP() {
 
 const LOCAL_IP = getLocalIP();
 
-// ==================== HTTP Basic Auth Middleware ====================
-function basicAuth(req, res, next) {
-    const authHeader = req.headers.authorization;
+// ==================== Cookie-Based Session Auth ====================
+const cookieParser = require('cookie-parser');
+app.use(cookieParser(SESSION_SECRET));
+app.use(express.json());
 
-    if (!authHeader) {
-        res.setHeader('WWW-Authenticate', 'Basic realm="Tuya DevKit Controller"');
-        return res.status(401).send('Authentication required');
-    }
-
-    const [type, credentials] = authHeader.split(' ');
-
-    if (type !== 'Basic' || !credentials) {
-        return res.status(401).send('Invalid authentication');
-    }
-
-    const decoded = Buffer.from(credentials, 'base64').toString('utf8');
-    const [username, password] = decoded.split(':');
-
-    if (username === AUTH_USERNAME && password === AUTH_PASSWORD) {
-        next();
-    } else {
-        res.setHeader('WWW-Authenticate', 'Basic realm="Tuya DevKit Controller"');
-        return res.status(401).send('Invalid credentials');
-    }
+// Generate session ID
+function generateSessionId() {
+    return crypto.randomBytes(32).toString('hex');
 }
 
-// Apply auth to all routes except health check
-app.use((req, res, next) => {
-    if (req.path === '/health') {
+// Validate session
+function validateSession(sessionId) {
+    if (!sessionId) return false;
+    const session = sessions.get(sessionId);
+    if (!session) return false;
+    // Check expiry (24 hours)
+    if (Date.now() - session.createdAt > 24 * 60 * 60 * 1000) {
+        sessions.delete(sessionId);
+        return false;
+    }
+    return true;
+}
+
+// Auth middleware - protect all routes except login page and API
+function authMiddleware(req, res, next) {
+    // Public paths that don't require auth
+    const publicPaths = ['/login.html', '/api/login', '/api/check-auth', '/health'];
+
+    if (publicPaths.some(p => req.path === p || req.path.startsWith(p))) {
         return next();
     }
-    basicAuth(req, res, next);
+
+    // Check session cookie
+    const sessionId = req.signedCookies.session;
+
+    if (validateSession(sessionId)) {
+        return next();
+    }
+
+    // Not authenticated - redirect to login or return 401 for API
+    if (req.path.startsWith('/api/')) {
+        return res.status(401).json({ error: 'Not authenticated' });
+    }
+
+    // Redirect to login with return URL
+    const returnUrl = encodeURIComponent(req.originalUrl);
+    return res.redirect(`/login.html?redirect=${returnUrl}`);
+}
+
+app.use(authMiddleware);
+app.use(express.static(path.join(__dirname, 'public')));
+
+// ==================== Auth API Endpoints ====================
+app.post('/api/login', (req, res) => {
+    const { username, password } = req.body;
+
+    if (username === AUTH_USERNAME && password === AUTH_PASSWORD) {
+        const sessionId = generateSessionId();
+        sessions.set(sessionId, {
+            username,
+            createdAt: Date.now()
+        });
+
+        res.cookie('session', sessionId, {
+            signed: true,
+            httpOnly: true,
+            secure: false, // Set to true if using HTTPS
+            sameSite: 'lax',
+            maxAge: 24 * 60 * 60 * 1000 // 24 hours
+        });
+
+        console.log(`[AUTH] User logged in: ${username}`);
+        return res.json({ success: true });
+    }
+
+    console.log(`[AUTH] Failed login attempt for: ${username}`);
+    return res.status(401).json({ success: false, error: 'Invalid username or password' });
 });
 
-app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
+app.get('/api/check-auth', (req, res) => {
+    const sessionId = req.signedCookies.session;
+    if (validateSession(sessionId)) {
+        const session = sessions.get(sessionId);
+        return res.json({ authenticated: true, username: session.username });
+    }
+    return res.status(401).json({ authenticated: false });
+});
+
+app.post('/api/logout', (req, res) => {
+    const sessionId = req.signedCookies.session;
+    if (sessionId) {
+        sessions.delete(sessionId);
+    }
+    res.clearCookie('session');
+    console.log(`[AUTH] User logged out`);
+    return res.json({ success: true });
+});
 
 // Redirect /ble to /ble/index.html
 app.get('/ble', (req, res) => {
@@ -128,6 +196,9 @@ const tcpServer = net.createServer((socket) => {
                             console.log(`[TCP] DevKit authenticated: ${clientInfo}`);
                             sendToDevKitRaw('auth:ok');
 
+                            // Start keep-alive ping
+                            startKeepAlive();
+
                             broadcastToWeb({
                                 type: 'devkit_status',
                                 connected: true,
@@ -149,6 +220,12 @@ const tcpServer = net.createServer((socket) => {
 
                 console.log(`[TCP] Received from DevKit: ${message}`);
 
+                // Handle pong responses silently (don't broadcast to web clients)
+                if (message === 'pong') {
+                    console.log(`[TCP] Keep-alive pong received`);
+                    continue;
+                }
+
                 // Forward to web clients
                 broadcastToWeb({
                     type: 'devkit_message',
@@ -163,6 +240,7 @@ const tcpServer = net.createServer((socket) => {
 
     socket.on('close', () => {
         console.log(`[TCP] DevKit disconnected: ${clientInfo}`);
+        stopKeepAlive();
         devkitSocket = null;
         devkitAuthenticated = false;
 
@@ -175,10 +253,38 @@ const tcpServer = net.createServer((socket) => {
 
     socket.on('error', (err) => {
         console.error(`[TCP] DevKit socket error: ${err.message}`);
+        stopKeepAlive();
         devkitSocket = null;
         devkitAuthenticated = false;
     });
 });
+
+// ==================== Keep-Alive Functions ====================
+
+function startKeepAlive() {
+    // Stop any existing interval first
+    stopKeepAlive();
+
+    console.log(`[TCP] Starting keep-alive ping (every ${KEEPALIVE_INTERVAL_MS / 1000}s)`);
+
+    keepAliveInterval = setInterval(() => {
+        if (devkitSocket && devkitAuthenticated) {
+            console.log(`[TCP] Sending keep-alive ping`);
+            sendToDevKitRaw('ping');
+        } else {
+            // DevKit disconnected, stop the interval
+            stopKeepAlive();
+        }
+    }, KEEPALIVE_INTERVAL_MS);
+}
+
+function stopKeepAlive() {
+    if (keepAliveInterval) {
+        console.log(`[TCP] Stopping keep-alive ping`);
+        clearInterval(keepAliveInterval);
+        keepAliveInterval = null;
+    }
+}
 
 tcpServer.listen(TCP_PORT, '0.0.0.0', () => {
     console.log(`[TCP] Server listening on port ${TCP_PORT}`);
