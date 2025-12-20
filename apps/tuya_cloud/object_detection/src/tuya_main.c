@@ -85,6 +85,9 @@ static uint8_t g_current_volume = DEFAULT_VOLUME;
 #define PROJECT_VERSION "1.0.0"
 #endif
 
+/* Global TCP host for mic streaming UDP */
+char g_tcp_host[64] = "";
+
 /* for cli command register */
 extern void tuya_app_cli_init(void);
 
@@ -109,6 +112,13 @@ static void tcp_message_callback(const char *data, uint32_t len)
     /* Handle server responses (not commands) */
     if (strncmp(data, "auth:ok", 7) == 0) {
         PR_INFO("Server authenticated us successfully");
+        /* Auto-start mic streaming on connection via UDP */
+        if (!mic_streaming_is_active()) {
+            /* Use same host as TCP, but UDP port 5001 */
+            extern char g_tcp_host[64];
+            mic_streaming_start(g_tcp_host, 5001);
+            PR_INFO("Auto-started mic streaming via UDP");
+        }
         return;  /* Don't process as a command */
     }
     
@@ -154,11 +164,11 @@ static void tcp_message_callback(const char *data, uint32_t len)
         tcp_client_send_str("ok:audio_stopped");
     }
     else if (strncmp(data, "mic on", 6) == 0) {
-        /* Start microphone streaming to web app */
+        /* Start microphone streaming to web app via UDP */
         if (mic_streaming_is_active()) {
             tcp_client_send_str("ok:mic_already_on");
         } else {
-            OPERATE_RET rt = mic_streaming_start();
+            OPERATE_RET rt = mic_streaming_start(g_tcp_host, 5001);
             if (rt == OPRT_OK) {
                 tcp_client_send_str("ok:mic_on");
             } else {
@@ -685,33 +695,32 @@ void user_main(void)
 
     /* Initialize TCP client for web app communication */
     /* First try to load saved settings from KV storage */
-    char tcp_host[64] = "";
     uint16_t tcp_port = TCP_SERVER_PORT;
     char tcp_token[64] = "";
     
-    if (ble_config_load_tcp_settings(tcp_host, &tcp_port, tcp_token) == OPRT_OK && tcp_host[0]) {
+    if (ble_config_load_tcp_settings(g_tcp_host, &tcp_port, tcp_token) == OPRT_OK && g_tcp_host[0]) {
         PR_NOTICE("============================================");
         PR_NOTICE("     WEB APP CONNECTION (SAVED)");
         PR_NOTICE("============================================");
-        PR_NOTICE("TCP Server: %s:%d", tcp_host, tcp_port);
+        PR_NOTICE("TCP Server: %s:%d", g_tcp_host, tcp_port);
         PR_NOTICE("(Settings loaded from flash storage)");
         PR_NOTICE("Configure: https://ble-config-web.vercel.app");
         PR_NOTICE("============================================");
     } else {
         /* Use compile-time defaults */
-        strncpy(tcp_host, TCP_SERVER_HOST, sizeof(tcp_host) - 1);
+        strncpy(g_tcp_host, TCP_SERVER_HOST, sizeof(g_tcp_host) - 1);
         tcp_port = TCP_SERVER_PORT;
         
         PR_NOTICE("============================================");
         PR_NOTICE("     WEB APP CONNECTION (DEFAULT)");
         PR_NOTICE("============================================");
-        PR_NOTICE("TCP Server: %s:%d", tcp_host, tcp_port);
+        PR_NOTICE("TCP Server: %s:%d", g_tcp_host, tcp_port);
         PR_NOTICE("(Using compile-time defaults from .env)");
         PR_NOTICE("Configure: https://ble-config-web.vercel.app");
         PR_NOTICE("============================================");
     }
     
-    if (tcp_client_init(tcp_host, tcp_port, tcp_message_callback) == OPRT_OK) {
+    if (tcp_client_init(g_tcp_host, tcp_port, tcp_message_callback) == OPRT_OK) {
         tcp_client_start();
         PR_INFO("TCP client started - will connect to web app server");
     } else {

@@ -3,7 +3,8 @@
  * 
  * This server provides:
  * 1. TCP Server (port 5000) - DevKit connects here (with token auth)
- * 2. HTTP + WebSocket Server (port 3000) - Serves web UI and WebSocket on same port
+ * 2. UDP Server (port 5001) - DevKit sends audio here (low latency)
+ * 3. HTTP + WebSocket Server (port 3000) - Serves web UI and WebSocket on same port
  * 
  * Security:
  * - Session-based auth with login page for web UI
@@ -13,6 +14,7 @@
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const net = require('net');
+const dgram = require('dgram');
 const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
@@ -26,6 +28,7 @@ const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toSt
 // Configuration
 const HTTP_PORT = process.env.HTTP_PORT || 3000;
 const TCP_PORT = process.env.TCP_PORT || 5000;
+const UDP_PORT = process.env.UDP_PORT || 5001;
 
 // Express app for serving static files
 const app = express();
@@ -202,9 +205,7 @@ const tcpServer = net.createServer((socket) => {
                         console.log(`[TCP] DevKit authenticated: ${clientInfo}`);
                         sendToDevKitRaw('auth:ok');
 
-                        // Start keep-alive ping
-                        startKeepAlive();
-
+                        
                         broadcastToWeb({
                             type: 'devkit_status',
                             connected: true,
@@ -309,6 +310,30 @@ tcpServer.listen(TCP_PORT, '0.0.0.0', () => {
     console.log(`[TCP] DevKit should connect to: ${LOCAL_IP}:${TCP_PORT}`);
 });
 
+// ==================== UDP Server for Audio (low latency) ====================
+const udpServer = dgram.createSocket('udp4');
+let udpPacketCount = 0;
+
+udpServer.on('message', (msg, rinfo) => {
+    udpPacketCount++;
+    if (udpPacketCount % 50 === 1) {
+        console.log(`[UDP] Received ${msg.length} bytes from ${rinfo.address}:${rinfo.port} (total: ${udpPacketCount})`);
+    }
+    // Forward raw PCM audio to web clients
+    broadcastAudioToWeb(msg);
+});
+
+udpServer.on('listening', () => {
+    const addr = udpServer.address();
+    console.log(`[UDP] Audio server listening on port ${addr.port}`);
+});
+
+udpServer.on('error', (err) => {
+    console.error(`[UDP] Server error: ${err.message}`);
+});
+
+udpServer.bind(UDP_PORT, '0.0.0.0');
+
 // ==================== WebSocket Server (on same port as HTTP) ====================
 const wss = new WebSocketServer({ server });
 
@@ -394,24 +419,35 @@ function broadcastToWeb(data) {
  * Audio format: PCM 16-bit, 8000Hz, mono
  */
 function broadcastAudioToWeb(audioData) {
-    // Create a message header to identify this as audio data
-    const header = Buffer.from(JSON.stringify({
-        type: 'audio_data',
-        sampleRate: 8000,
-        channels: 1,
-        bitsPerSample: 16,
-        length: audioData.length
-    }) + '\n');
-
-    webClients.forEach((state, client) => {
-        if (client.readyState === 1 && state.authenticated) {
-            // Send as binary data with JSON header
-            // First send the header, then the binary audio data
-            client.send(header);
-            client.send(audioData);
+    // Stream raw PCM to connected audio clients
+    audioClients.forEach(res => {
+        try { 
+            res.write(audioData); 
+        } catch(e) { 
+            audioClients.delete(res); 
         }
     });
 }
+
+// Audio streaming - raw PCM chunks
+let audioClients = new Set();
+
+// Audio stream endpoint - serves raw PCM data as chunked stream
+// Client uses Web Audio API to play it
+app.get('/audio-stream', (req, res) => {
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-store');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Audio-Format', 'pcm-s16le-8000hz-mono');
+    
+    audioClients.add(res);
+    console.log(`[AUDIO] Client connected, total: ${audioClients.size}`);
+    
+    req.on('close', () => {
+        audioClients.delete(res);
+        console.log(`[AUDIO] Client disconnected, total: ${audioClients.size}`);
+    });
+});
 
 function sendToDevKitRaw(data) {
     if (!devkitSocket) return false;
@@ -496,7 +532,8 @@ server.listen(HTTP_PORT, '0.0.0.0', () => {
     console.log('  DevKit Communication Server Started (WITH AUTH)');
     console.log('='.repeat(60));
     console.log(`  Web UI + WS: http://${LOCAL_IP}:${HTTP_PORT}`);
-    console.log(`  TCP Server:  ${LOCAL_IP}:${TCP_PORT} (for DevKit)`);
+    console.log(`  TCP Server:  ${LOCAL_IP}:${TCP_PORT} (for DevKit commands)`);
+    console.log(`  UDP Server:  ${LOCAL_IP}:${UDP_PORT} (for DevKit audio)`);
     console.log('');
     console.log(`  Auth Username: ${AUTH_USERNAME}`);
     console.log(`  Auth Password: ${'*'.repeat(AUTH_PASSWORD.length)}`);

@@ -1,9 +1,9 @@
 /**
  * @file mic_streaming.h
- * @brief Microphone audio streaming over TCP
+ * @brief Microphone audio streaming over UDP
  * 
  * Captures audio from the onboard microphone and streams it
- * via TCP to the web application for playback.
+ * via UDP to the web application for low-latency playback.
  *
  * @copyright Copyright (c) 2021-2025 Tuya Inc. All Rights Reserved.
  */
@@ -27,16 +27,18 @@ extern "C" {
 OPERATE_RET mic_streaming_init(void);
 
 /**
- * @brief Start microphone streaming
+ * @brief Start microphone streaming via UDP
  * 
  * Enables the onboard microphone and starts sending audio
- * data over TCP using the "audio_data:" prefix.
+ * data over UDP to the specified server.
  * 
  * Audio format: PCM 16-bit, 8000Hz, mono
  * 
+ * @param host Server IP address for UDP audio
+ * @param port UDP port (e.g., 5001)
  * @return OPRT_OK on success
  */
-OPERATE_RET mic_streaming_start(void);
+OPERATE_RET mic_streaming_start(const char *host, uint16_t port);
 
 /**
  * @brief Stop microphone streaming

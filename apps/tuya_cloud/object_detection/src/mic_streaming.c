@@ -1,15 +1,15 @@
 /**
  * @file mic_streaming.c
- * @brief Microphone audio streaming over TCP
+ * @brief Microphone audio streaming over UDP
  * 
  * Captures audio from the onboard microphone and streams it
- * via TCP to the web application for playback.
+ * via UDP to the web application for low-latency playback.
  *
  * @copyright Copyright (c) 2021-2025 Tuya Inc. All Rights Reserved.
  */
 
 #include "mic_streaming.h"
-#include "tcp_client.h"
+#include "udp_audio.h"
 #include "tal_api.h"
 #include "tdl_audio_manage.h"
 #include "tuya_ringbuf.h"
@@ -31,11 +31,10 @@
 /* Streaming task configuration */
 #define MIC_STREAM_TASK_STACK   4096
 #define MIC_STREAM_TASK_PRIO    THREAD_PRIO_2
-#define MIC_STREAM_INTERVAL_MS  40  /* Send every 40ms (2 frames = 640 bytes) */
+#define MIC_STREAM_INTERVAL_MS  20  /* Send every 20ms for lower latency */
 
-/* Message header for audio data - binary format with prefix */
-#define AUDIO_MSG_PREFIX    "audio:"  /* 6 bytes */
-#define AUDIO_MSG_PREFIX_LEN 6
+/* UDP port for audio streaming */
+#define UDP_AUDIO_PORT      5001
 
 /***********************************************************
 ***********************typedef define***********************
@@ -70,6 +69,15 @@ static void mic_audio_frame_callback(TDL_AUDIO_FRAME_FORMAT_E type,
                                       TDL_AUDIO_STATUS_E status,
                                       uint8_t *data, uint32_t len)
 {
+    static uint32_t callback_count = 0;
+    callback_count++;
+    
+    /* Log every 100 callbacks to confirm mic is working */
+    if (callback_count % 100 == 1) {
+        PR_DEBUG("Mic callback #%u: streaming=%d, type=%d, len=%u", 
+                 callback_count, g_mic_ctx.streaming, type, len);
+    }
+    
     if (!g_mic_ctx.streaming || !g_mic_ctx.ringbuf) {
         return;
     }
@@ -84,41 +92,49 @@ static void mic_audio_frame_callback(TDL_AUDIO_FRAME_FORMAT_E type,
 }
 
 /**
- * @brief Streaming task - reads from ringbuf and sends to TCP
+ * @brief Streaming task - reads from ringbuf and sends via UDP
  */
 static void mic_streaming_task(void *arg)
 {
-    uint8_t send_buf[AUDIO_MSG_PREFIX_LEN + MIC_FRAME_SIZE * 2 + 4];  /* prefix + data + padding */
+    uint8_t send_buf[MIC_FRAME_SIZE * 2];
     uint32_t data_len;
+    uint32_t send_count = 0;
     
-    PR_INFO("Mic streaming task started");
+    PR_INFO("Mic streaming task started (UDP)");
     
     while (g_mic_ctx.streaming) {
         /* Check how much data is available */
         data_len = tuya_ring_buff_used_size_get(g_mic_ctx.ringbuf);
         
+        /* Log buffer status periodically */
+        if (send_count % 100 == 0) {
+            PR_DEBUG("Mic stream: ringbuf=%u bytes, udp_ready=%d", 
+                     data_len, udp_audio_is_ready());
+        }
+        
         if (data_len >= MIC_FRAME_SIZE) {
-            /* Limit to 2 frames per send to keep latency low */
-            if (data_len > MIC_FRAME_SIZE * 2) {
-                data_len = MIC_FRAME_SIZE * 2;
+            /* Send 1 frame at a time for lower latency */
+            if (data_len > MIC_FRAME_SIZE) {
+                data_len = MIC_FRAME_SIZE;
             }
             
             /* Read audio data from ring buffer */
             uint32_t read_len = tuya_ring_buff_read(g_mic_ctx.ringbuf, 
-                                                     send_buf + AUDIO_MSG_PREFIX_LEN, 
+                                                     send_buf, 
                                                      data_len);
             
-            if (read_len > 0) {
-                /* Add prefix for audio data identification */
-                memcpy(send_buf, AUDIO_MSG_PREFIX, AUDIO_MSG_PREFIX_LEN);
-                
-                /* Send via TCP as binary with prefix */
-                if (tcp_client_is_connected()) {
-                    OPERATE_RET rt = tcp_client_send((const char *)send_buf, 
-                                                      AUDIO_MSG_PREFIX_LEN + read_len);
-                    if (rt == OPRT_OK) {
-                        g_mic_ctx.total_bytes_sent += read_len;
-                        g_mic_ctx.total_frames_sent++;
+            if (read_len > 0 && udp_audio_is_ready()) {
+                /* Send via UDP - no prefix needed, raw PCM */
+                OPERATE_RET rt = udp_audio_send(send_buf, read_len);
+                if (rt == OPRT_OK) {
+                    g_mic_ctx.total_bytes_sent += read_len;
+                    g_mic_ctx.total_frames_sent++;
+                    send_count++;
+                    
+                    /* Log every 50 sends (~1 second) */
+                    if (send_count % 50 == 0) {
+                        PR_INFO("Mic UDP sent: %u frames, %u bytes total", 
+                                g_mic_ctx.total_frames_sent, g_mic_ctx.total_bytes_sent);
                     }
                 }
             }
@@ -163,7 +179,7 @@ OPERATE_RET mic_streaming_init(void)
     return OPRT_OK;
 }
 
-OPERATE_RET mic_streaming_start(void)
+OPERATE_RET mic_streaming_start(const char *host, uint16_t port)
 {
     OPERATE_RET rt = OPRT_OK;
     
@@ -175,6 +191,13 @@ OPERATE_RET mic_streaming_start(void)
     if (g_mic_ctx.streaming) {
         PR_WARN("Mic streaming already active");
         return OPRT_OK;
+    }
+    
+    /* Initialize UDP audio sender */
+    rt = udp_audio_init(host, port);
+    if (rt != OPRT_OK) {
+        PR_ERR("Failed to init UDP audio: %d", rt);
+        return rt;
     }
     
     /* Reset ring buffer */
@@ -205,7 +228,7 @@ OPERATE_RET mic_streaming_start(void)
         return rt;
     }
     
-    PR_NOTICE("Mic streaming started - sending audio to web app");
+    PR_NOTICE("Mic streaming started via UDP to %s:%d", host, port);
     
     return OPRT_OK;
 }
