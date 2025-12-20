@@ -1,14 +1,14 @@
 /**
  * @file mic_streaming.c
- * @brief Microphone audio streaming over UDP with G.711 encoding
+ * @brief Microphone audio streaming over UDP for WebRTC/Opus encoding
  * 
- * Captures audio from the onboard microphone, encodes it as G.711 u-law,
- * and streams it via UDP to the web application for low-latency playback.
+ * Captures audio from the onboard microphone, sends raw PCM via UDP
+ * to the VPS for server-side Opus encoding and WebRTC streaming.
  * 
- * G.711 benefits:
- * - 50% bandwidth reduction
- * - Robust against packet loss (1 byte = 1 sample)
- * - No byte alignment issues
+ * WebRTC/Opus benefits:
+ * - WebRTC jitter buffer handles packet loss
+ * - Opus provides excellent compression (~24kbps)
+ * - Native browser playback (no custom decoder)
  *
  * @copyright Copyright (c) 2021-2025 Tuya Inc. All Rights Reserved.
  */
@@ -152,7 +152,7 @@ static void udp_keepalive_task(void *arg)
 }
 
 /**
- * @brief Streaming task - reads PCM from ringbuf, encodes to G.711, sends via UDP
+ * @brief Streaming task - reads PCM from ringbuf, sends via UDP for server-side encoding
  */
 static void mic_streaming_task(void *arg)
 {
@@ -163,16 +163,20 @@ static void mic_streaming_task(void *arg)
     uint32_t loop_count = 0;
     uint32_t empty_count = 0;
     uint32_t last_heartbeat = 0;
+    uint32_t drop_count = 0;
     
-    PR_INFO("Mic streaming task started (G.711 over UDP)");
+    /* Max buffer threshold: 200ms of audio = 10 frames * 640 bytes = 6400 bytes */
+    const uint32_t MAX_BUFFER_BYTES = 6400;
+    
+    PR_INFO("Mic streaming task started (raw PCM for WebRTC/Opus)");
     
     while (g_mic_ctx.streaming) {
         loop_count++;
         
         /* Heartbeat every 5 seconds to show thread is alive */
         if ((loop_count - last_heartbeat) >= 500) {  /* 500 * 10ms = 5 seconds */
-            PR_INFO("Mic stream heartbeat: loops=%u, sends=%u, empty=%u, captured=%u bytes", 
-                     loop_count, send_count, empty_count, g_mic_ctx.total_bytes_captured);
+            PR_INFO("Mic stream heartbeat: loops=%u, sends=%u, empty=%u, drops=%u, captured=%u bytes", 
+                     loop_count, send_count, empty_count, drop_count, g_mic_ctx.total_bytes_captured);
             last_heartbeat = loop_count;
         }
         
@@ -185,6 +189,19 @@ static void mic_streaming_task(void *arg)
         /* Check how much data is available */
         data_len = tuya_ring_buff_used_size_get(g_mic_ctx.ringbuf);
         
+        /* LATENCY PROTECTION: If buffer has more than 200ms of audio, drop old data */
+        if (data_len > MAX_BUFFER_BYTES) {
+            uint32_t to_drop = data_len - MIC_FRAME_SIZE_PCM;  /* Keep only 1 frame */
+            PR_WARN("Buffer bloat! Dropping %u bytes to catch up to real-time", to_drop);
+            
+            /* Discard old audio by reading and throwing away */
+            while (tuya_ring_buff_used_size_get(g_mic_ctx.ringbuf) > MIC_FRAME_SIZE_PCM) {
+                tuya_ring_buff_read(g_mic_ctx.ringbuf, pcm_buffer, MIC_FRAME_SIZE_PCM);
+                drop_count++;
+            }
+            data_len = tuya_ring_buff_used_size_get(g_mic_ctx.ringbuf);
+        }
+        
         /* Process frames while we have enough data */
         while (data_len >= MIC_FRAME_SIZE_PCM && udp_audio_is_ready()) {
             empty_count = 0;  /* Reset empty counter */
@@ -195,7 +212,7 @@ static void mic_streaming_task(void *arg)
                                                      MIC_FRAME_SIZE_PCM);
             
             if (read_len == MIC_FRAME_SIZE_PCM) {
-                /* Send via UDP with G.711 encoding */
+                /* Send raw PCM via UDP (server encodes to Opus) */
                 /* pcm_buffer contains PCM bytes, convert to samples count */
                 int16_t *pcm_samples = (int16_t *)pcm_buffer;
                 uint32_t num_samples = read_len / 2;  /* 2 bytes per sample */
@@ -208,11 +225,11 @@ static void mic_streaming_task(void *arg)
                     
                     /* Log every 100 sends (~2 seconds at 50 frames/sec) */
                     if (send_count % 100 == 0) {
-                        PR_INFO("Mic G.711 sent: %u frames, seq=%u", 
+                        PR_INFO("Mic PCM sent: %u frames, seq=%u", 
                                 g_mic_ctx.total_frames_sent, udp_audio_get_seq());
                     }
                 } else {
-                    PR_WARN("UDP G.711 send failed: %d", rt);
+                    PR_WARN("UDP PCM send failed: %d", rt);
                     break;  /* Stop trying if UDP fails */
                 }
             } else {
@@ -267,7 +284,7 @@ OPERATE_RET mic_streaming_init(void)
     }
     
     g_mic_ctx.initialized = true;
-    PR_INFO("Mic streaming initialized (G.711 mode)");
+    PR_INFO("Mic streaming initialized (raw PCM for WebRTC/Opus)");
     PR_INFO("  Sample rate: %d Hz, Frame: %d samples (%d ms)", 
             MIC_SAMPLE_RATE, MIC_FRAME_SAMPLES, MIC_FRAME_MS);
     PR_INFO("  Ring buffer: %d bytes", MIC_RINGBUF_SIZE);
@@ -338,7 +355,7 @@ OPERATE_RET mic_streaming_start(const char *host, uint16_t port)
         /* Not critical - audio will still work, just NAT may timeout */
     }
     
-    PR_NOTICE("Mic streaming started (G.711 over UDP to %s:%d)", host, port);
+    PR_NOTICE("Mic streaming started (raw PCM over UDP to %s:%d for WebRTC/Opus)", host, port);
     
     return OPRT_OK;
 }

@@ -584,9 +584,16 @@
             log('info', `Connecting to WebSocket: ${wsUrl}`);
 
             ws = new WebSocket(wsUrl);
+            let wsPingInterval = null;
 
             ws.onopen = () => {
                 log('info', 'WebSocket connected, authenticating...');
+                // Send keepalive ping every 30 seconds to prevent Cloudflare timeout
+                wsPingInterval = setInterval(() => {
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ type: 'ping' }));
+                    }
+                }, 30000);
             };
 
             ws.onmessage = (event) => {
@@ -604,8 +611,10 @@
             ws.onclose = () => {
                 log('info', 'WebSocket disconnected');
                 updateWsStatus(false);
-                // Don't update DevKit status or stop mic stream on WS disconnect
-                // The audio stream is independent of WebSocket
+                if (wsPingInterval) {
+                    clearInterval(wsPingInterval);
+                    wsPingInterval = null;
+                }
 
                 // Auto-reconnect after 2 seconds
                 setTimeout(() => {
@@ -738,18 +747,25 @@
         }
 
 
-        // ==================== Web Audio API Mic Streaming (WebSocket + G.711) ====================
-        let audioContext = null;
+        // ==================== WebRTC Audio Streaming (Opus) ====================
+        let peerConnection = null;
         let micStreamActive = false;
-        let audioWs = null;  // Dedicated WebSocket for audio
-        let nextPlayTime = 0;
-        let activeSources = []; // Track active audio sources for cleanup
+        let remoteAudioElement = null;
 
-        // Audio configuration
-        const AUDIO_SAMPLE_RATE = 16000; // 16kHz from T5AI mic
+        // Create audio element for WebRTC playback
+        function createAudioElement() {
+            if (remoteAudioElement) return remoteAudioElement;
 
-        // G.711 u-Law Lookup Table (pre-calculated for fast decoding)
-        // Maps 8-bit u-law to linear float (-1.0 to 1.0)
+            remoteAudioElement = document.createElement('audio');
+            remoteAudioElement.id = 'webrtc-audio';
+            remoteAudioElement.autoplay = true;
+            remoteAudioElement.controls = false;
+            document.body.appendChild(remoteAudioElement);
+            return remoteAudioElement;
+        }
+
+        // G.711 lookup table - kept for legacy fallback but not used in WebRTC mode
+        const AUDIO_SAMPLE_RATE = 16000;
         const ULAW_LOOKUP = new Float32Array(256);
         (function initUlawTable() {
             for (let i = 0; i < 256; i++) {
@@ -809,53 +825,93 @@
             nextPlayTime += buffer.duration;
         }
 
-        // Connect just the audio WebSocket (used for reconnection)
-        function connectAudioWebSocket() {
-            // Close existing connection if any
-            if (audioWs) {
-                audioWs.onclose = null;
-                audioWs.close();
-            }
-
-            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${wsProtocol}//${window.location.host}/ws-audio`;
-
-            log('info', `Connecting to audio WebSocket: ${wsUrl}`);
-            audioWs = new WebSocket(wsUrl);
-            audioWs.binaryType = 'arraybuffer';
-
-            audioWs.onopen = () => {
-                log('info', '✅ Audio WebSocket connected (low-latency mode)');
-            };
-
-            audioWs.onmessage = (event) => {
-                if (micStreamActive) {
-                    playG711Packet(event.data);
-                }
-            };
-
-            audioWs.onerror = (error) => {
-                log('error', 'Audio WebSocket error');
-                console.error('Audio WS error:', error);
-            };
-
-            audioWs.onclose = () => {
-                log('info', 'Audio WebSocket closed');
-                audioWs = null;
-                if (micStreamActive) {
-                    // Try to reconnect
-                    setTimeout(() => {
-                        if (micStreamActive) {
-                            log('info', 'Attempting to reconnect audio WebSocket...');
-                            connectAudioWebSocket();
+        // Connect to WebRTC audio stream
+        async function connectWebRTC() {
+            try {
+                // Create peer connection with STUN + self-hosted TURN
+                const config = {
+                    iceServers: [
+                        // Google's free STUN (works for ~80% of connections)
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun1.l.google.com:19302' },
+                        // Self-hosted TURN server (relay for remaining ~20%)
+                        {
+                            urls: 'turn:13.212.218.43:3478',
+                            username: 'turnuser',
+                            credential: 'TuyaT5DevKit2024'
+                        },
+                        {
+                            urls: 'turn:13.212.218.43:3478?transport=tcp',
+                            username: 'turnuser',
+                            credential: 'TuyaT5DevKit2024'
                         }
-                    }, 1000);
-                }
-            };
+                    ]
+                };
+
+                peerConnection = new RTCPeerConnection(config);
+
+                // Handle incoming audio track
+                peerConnection.ontrack = function (event) {
+                    log('info', '🎵 WebRTC audio track received');
+                    const audioEl = createAudioElement();
+                    audioEl.srcObject = event.streams[0];
+                    audioEl.play().catch(e => {
+                        log('warn', 'Audio autoplay blocked');
+                    });
+                };
+
+                // Log connection state changes
+                peerConnection.onconnectionstatechange = function () {
+                    log('info', `WebRTC: ${peerConnection.connectionState}`);
+                    if (peerConnection.connectionState === 'connected') {
+                        document.getElementById('mic-stream-status').textContent = '🎵 WebRTC (Opus)';
+                        document.getElementById('mic-stream-status').style.color = 'var(--accent-green)';
+                    } else if (peerConnection.connectionState === 'failed') {
+                        if (micStreamActive) {
+                            setTimeout(() => { if (micStreamActive) connectWebRTC(); }, 2000);
+                        }
+                    }
+                };
+
+                // Log ICE connection state
+                peerConnection.oniceconnectionstatechange = function () {
+                    log('info', `ICE: ${peerConnection.iceConnectionState}`);
+                };
+
+                // Log ICE candidates
+                peerConnection.onicecandidate = function (event) {
+                    if (event.candidate) {
+                        log('info', `ICE candidate: ${event.candidate.type || 'unknown'} ${event.candidate.protocol || ''}`);
+                    }
+                };
+
+                // Add receive-only audio transceiver
+                peerConnection.addTransceiver('audio', { direction: 'recvonly' });
+
+                // Create and send offer
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+
+                log('info', 'Sending WebRTC offer...');
+                const response = await fetch('/webrtc-offer', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(offer)
+                });
+
+                if (!response.ok) throw new Error(`Server: ${response.status}`);
+
+                const answer = await response.json();
+                await peerConnection.setRemoteDescription(answer);
+                log('info', '✅ WebRTC connected');
+
+            } catch (error) {
+                log('error', 'WebRTC error: ' + error.message);
+                throw error;
+            }
         }
 
         async function startMicStream() {
-
             // Prevent multiple starts
             if (micStreamActive) {
                 log('warn', 'Mic stream already active');
@@ -863,45 +919,27 @@
             }
 
             try {
-                // Create AudioContext with low-latency hint
-                if (!audioContext) {
-                    audioContext = new (window.AudioContext || window.webkitAudioContext)({
-                        latencyHint: 'interactive',
-                        sampleRate: AUDIO_SAMPLE_RATE
-                    });
-                    log('info', `AudioContext created (latencyHint: interactive, sampleRate: ${audioContext.sampleRate}Hz)`);
-                }
+                log('info', 'Starting WebRTC audio stream...');
 
-                // Resume if suspended
-                if (audioContext.state === 'suspended') {
-                    await audioContext.resume();
-                }
-
-                // FIRST: Send "mic on" command to DevKit to start UDP streaming
+                // Send "mic on" command to DevKit to start UDP streaming
                 if (ws && ws.readyState === WebSocket.OPEN) {
-                    log('info', 'Sending "mic on" command to DevKit...');
                     ws.send(JSON.stringify({
                         type: 'send_to_devkit',
                         data: 'mic on'
                     }));
-                    // Wait a bit for DevKit to start streaming
                     await new Promise(r => setTimeout(r, 200));
                 } else {
-                    log('warn', 'WebSocket not connected, mic stream may not receive data');
+                    log('warn', 'WebSocket not connected');
                 }
 
                 micStreamActive = true;
-                nextPlayTime = audioContext.currentTime + 0.05; // Start with 50ms buffer
-
                 document.getElementById('btn-mic-start').disabled = true;
                 document.getElementById('btn-mic-stop').disabled = false;
-                document.getElementById('mic-stream-status').textContent = '🔴 WebSocket G.711 (Low Latency)';
-                document.getElementById('mic-stream-status').style.color = 'var(--accent-green)';
+                document.getElementById('mic-stream-status').textContent = '🔄 Connecting WebRTC...';
+                document.getElementById('mic-stream-status').style.color = 'var(--accent-orange)';
 
-                // Connect to WebSocket audio endpoint
-                connectAudioWebSocket();
-
-
+                // Connect to WebRTC
+                await connectWebRTC();
 
             } catch (err) {
                 log('error', 'Mic stream error: ' + err.message);
@@ -914,36 +952,21 @@
         }
 
 
+
         // Stop mic stream locally (audio playback only, no command to DevKit)
-        // Use this when DevKit disconnects to avoid sending commands during reconnect
         function stopMicStreamLocal() {
             micStreamActive = false;
 
-            // Close audio WebSocket
-            if (audioWs) {
-                audioWs.onclose = null; // Prevent reconnect attempt
-                audioWs.close();
-                audioWs = null;
+            // Close WebRTC peer connection
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
             }
 
-            // Stop all active audio sources immediately
-            for (const source of activeSources) {
-                try {
-                    source.stop();
-                    source.disconnect();
-                } catch (e) {
-                    // Source may have already ended
-                }
+            // Stop audio element
+            if (remoteAudioElement) {
+                remoteAudioElement.srcObject = null;
             }
-            activeSources = [];
-
-            // Suspend AudioContext to immediately stop any remaining audio
-            if (audioContext && audioContext.state === 'running') {
-                audioContext.suspend().catch(() => { });
-            }
-
-            // Reset play time
-            nextPlayTime = 0;
 
             // Update UI
             document.getElementById('btn-mic-start').disabled = false;
@@ -951,6 +974,7 @@
             document.getElementById('mic-stream-status').textContent = '(click Start to listen)';
             document.getElementById('mic-stream-status').style.color = 'var(--text-secondary)';
         }
+
 
 
         // Stop mic stream and send command to DevKit (user-initiated stop)

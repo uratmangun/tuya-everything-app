@@ -1,5 +1,5 @@
-// DevKit Communication Server in Go
-// Provides: TCP (5000), UDP (5001 with G.711 decoding), HTTP+WebSocket (3000)
+// DevKit Communication Server with WebRTC/Opus Audio
+// Provides: TCP (5000), UDP (5001 for raw PCM), HTTP+WebSocket (3000), WebRTC Audio
 package main
 
 import (
@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -20,6 +21,9 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/hraban/opus"
+	"github.com/pion/webrtc/v3"
+	"github.com/pion/webrtc/v3/pkg/media"
 )
 
 // Config from environment
@@ -31,6 +35,15 @@ var (
 	httpPort      = getEnv("HTTP_PORT", "3000")
 	tcpPort       = getEnv("TCP_PORT", "5000")
 	udpPort       = getEnv("UDP_PORT", "5001")
+)
+
+// Audio configuration
+const (
+	sampleRate       = 16000
+	channels         = 1
+	frameSizeMs      = 20
+	frameSizeSamples = sampleRate * frameSizeMs / 1000 // 320 samples
+	frameSizeBytes   = frameSizeSamples * 2            // 640 bytes (16-bit)
 )
 
 // Session store
@@ -73,15 +86,24 @@ var (
 	audioClientsMu sync.RWMutex
 )
 
-// Audio WebSocket clients (low-latency G.711 push)
-type AudioWSClient struct {
-	conn *websocket.Conn
-	mu   sync.Mutex
-}
-
+// WebRTC Audio Track (global, shared by all peer connections)
 var (
-	audioWSClients   = make(map[*AudioWSClient]bool)
-	audioWSClientsMu sync.RWMutex
+	audioTrack      *webrtc.TrackLocalStaticSample
+	audioTrackMutex sync.RWMutex
+	opusEncoder     *opus.Encoder
+	opusMutex       sync.Mutex
+)
+
+// WebRTC Peer Connections
+var (
+	peerConnections   = make(map[*webrtc.PeerConnection]bool)
+	peerConnectionsMu sync.RWMutex
+)
+
+// Jitter Buffer - decouples UDP reception from WebRTC sending
+var (
+	jitterBuffer    = make(chan []int16, 50) // Buffer up to 50 frames (~1 second)
+	jitterDropCount uint64
 )
 
 // UDP packet statistics
@@ -92,55 +114,6 @@ var (
 	udpBytesDecoded uint64
 	udpPingCount    uint64
 )
-
-// ==================== G.711 u-law Decoder ====================
-// G.711 u-law decoding table (converts 8-bit u-law to 16-bit PCM)
-var ulawToLinear = [256]int16{
-	-32124, -31100, -30076, -29052, -28028, -27004, -25980, -24956,
-	-23932, -22908, -21884, -20860, -19836, -18812, -17788, -16764,
-	-15996, -15484, -14972, -14460, -13948, -13436, -12924, -12412,
-	-11900, -11388, -10876, -10364, -9852, -9340, -8828, -8316,
-	-7932, -7676, -7420, -7164, -6908, -6652, -6396, -6140,
-	-5884, -5628, -5372, -5116, -4860, -4604, -4348, -4092,
-	-3900, -3772, -3644, -3516, -3388, -3260, -3132, -3004,
-	-2876, -2748, -2620, -2492, -2364, -2236, -2108, -1980,
-	-1884, -1820, -1756, -1692, -1628, -1564, -1500, -1436,
-	-1372, -1308, -1244, -1180, -1116, -1052, -988, -924,
-	-876, -844, -812, -780, -748, -716, -684, -652,
-	-620, -588, -556, -524, -492, -460, -428, -396,
-	-372, -356, -340, -324, -308, -292, -276, -260,
-	-244, -228, -212, -196, -180, -164, -148, -132,
-	-120, -112, -104, -96, -88, -80, -72, -64,
-	-56, -48, -40, -32, -24, -16, -8, 0,
-	32124, 31100, 30076, 29052, 28028, 27004, 25980, 24956,
-	23932, 22908, 21884, 20860, 19836, 18812, 17788, 16764,
-	15996, 15484, 14972, 14460, 13948, 13436, 12924, 12412,
-	11900, 11388, 10876, 10364, 9852, 9340, 8828, 8316,
-	7932, 7676, 7420, 7164, 6908, 6652, 6396, 6140,
-	5884, 5628, 5372, 5116, 4860, 4604, 4348, 4092,
-	3900, 3772, 3644, 3516, 3388, 3260, 3132, 3004,
-	2876, 2748, 2620, 2492, 2364, 2236, 2108, 1980,
-	1884, 1820, 1756, 1692, 1628, 1564, 1500, 1436,
-	1372, 1308, 1244, 1180, 1116, 1052, 988, 924,
-	876, 844, 812, 780, 748, 716, 684, 652,
-	620, 588, 556, 524, 492, 460, 428, 396,
-	372, 356, 340, 324, 308, 292, 276, 260,
-	244, 228, 212, 196, 180, 164, 148, 132,
-	120, 112, 104, 96, 88, 80, 72, 64,
-	56, 48, 40, 32, 24, 16, 8, 0,
-}
-
-// decodeG711ULaw decodes G.711 u-law bytes to 16-bit PCM
-func decodeG711ULaw(ulaw []byte) []byte {
-	pcm := make([]byte, len(ulaw)*2)
-	for i, u := range ulaw {
-		sample := ulawToLinear[u]
-		// Little-endian 16-bit
-		pcm[i*2] = byte(sample & 0xFF)
-		pcm[i*2+1] = byte((sample >> 8) & 0xFF)
-	}
-	return pcm
-}
 
 func getEnv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
@@ -199,13 +172,13 @@ func validateSession(sessionID string) bool {
 		return false
 	}
 	sessionMutex.RLock()
-	session, exists := sessions[sessionID]
+	sess, exists := sessions[sessionID]
 	sessionMutex.RUnlock()
 	if !exists {
 		return false
 	}
-	// 24 hour expiry
-	if time.Since(session.CreatedAt) > 24*time.Hour {
+	// Sessions expire after 24 hours
+	if time.Since(sess.CreatedAt) > 24*time.Hour {
 		sessionMutex.Lock()
 		delete(sessions, sessionID)
 		sessionMutex.Unlock()
@@ -214,121 +187,67 @@ func validateSession(sessionID string) bool {
 	return true
 }
 
-func getSessionFromCookie(r *http.Request) string {
-	cookie, err := r.Cookie("session")
+// ==================== Opus Encoder ====================
+
+func initOpusEncoder() error {
+	var err error
+	opusEncoder, err = opus.NewEncoder(sampleRate, channels, opus.AppVoIP)
 	if err != nil {
-		return ""
+		return fmt.Errorf("failed to create Opus encoder: %v", err)
 	}
-	sessionID, valid := verifySession(cookie.Value)
-	if !valid {
-		return ""
-	}
-	return sessionID
+	// Set bitrate to 24kbps for good quality
+	opusEncoder.SetBitrate(24000)
+	log.Println("[OPUS] Encoder initialized: 16kHz, mono, 24kbps")
+	return nil
 }
 
-// ==================== Broadcast Functions ====================
+func encodePCMToOpus(pcmData []int16) ([]byte, error) {
+	opusMutex.Lock()
+	defer opusMutex.Unlock()
 
-func broadcastToWeb(data interface{}) {
-	msg, err := json.Marshal(data)
+	if opusEncoder == nil {
+		return nil, fmt.Errorf("opus encoder not initialized")
+	}
+
+	opusBuffer := make([]byte, 1024)
+	n, err := opusEncoder.Encode(pcmData, opusBuffer)
 	if err != nil {
+		return nil, err
+	}
+	return opusBuffer[:n], nil
+}
+
+// ==================== WebRTC ====================
+
+func initWebRTCTrack() error {
+	var err error
+	audioTrack, err = webrtc.NewTrackLocalStaticSample(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus},
+		"audio", "doorbell-audio",
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create WebRTC track: %v", err)
+	}
+	log.Println("[WEBRTC] Audio track initialized (Opus)")
+	return nil
+}
+
+func writeAudioToTrack(opusData []byte) {
+	audioTrackMutex.RLock()
+	track := audioTrack
+	audioTrackMutex.RUnlock()
+
+	if track == nil {
 		return
 	}
-	wsClientsMu.RLock()
-	defer wsClientsMu.RUnlock()
-	for client := range wsClients {
-		if client.authenticated {
-			client.mu.Lock()
-			client.conn.WriteMessage(websocket.TextMessage, msg)
-			client.mu.Unlock()
-		}
-	}
-}
 
-func broadcastAudioToWeb(data []byte) {
-	audioClientsMu.RLock()
-	defer audioClientsMu.RUnlock()
-	for ch := range audioClients {
-		select {
-		case ch <- data:
-		default:
-			// Channel full, skip this client
-		}
-	}
-}
-
-// Broadcast raw G.711 data to WebSocket audio clients (low latency)
-func broadcastG711ToWSClients(data []byte) {
-	audioWSClientsMu.RLock()
-	defer audioWSClientsMu.RUnlock()
-	for client := range audioWSClients {
-		client.mu.Lock()
-		err := client.conn.WriteMessage(websocket.BinaryMessage, data)
-		client.mu.Unlock()
-		if err != nil {
-			// Mark for removal but don't remove during iteration
-			log.Printf("[WS-AUDIO] Write error: %v", err)
-		}
-	}
-}
-
-// ==================== DevKit TCP Communication ====================
-
-func sendToDevKitRaw(data string) bool {
-	devkitMutex.RLock()
-	conn := devkitConn
-	devkitMutex.RUnlock()
-	if conn == nil {
-		return false
-	}
-	payload := []byte(data)
-	header := make([]byte, 4)
-	binary.LittleEndian.PutUint32(header, uint32(len(payload)))
-	_, err := conn.Write(append(header, payload...))
-	return err == nil
-}
-
-func sendToDevKit(data string) bool {
-	devkitMutex.RLock()
-	conn := devkitConn
-	auth := devkitAuthenticated
-	devkitMutex.RUnlock()
-	if conn == nil || !auth {
-		log.Println("[TCP] Cannot send - DevKit not connected/authenticated")
-		broadcastToWeb(map[string]interface{}{
-			"type":      "error",
-			"message":   "DevKit not connected or not authenticated",
-			"timestamp": time.Now().Format(time.RFC3339),
-		})
-		return false
-	}
-	if sendToDevKitRaw(data) {
-		log.Printf("[TCP] Sent to DevKit: %s", data)
-		broadcastToWeb(map[string]interface{}{
-			"type":      "sent_to_devkit",
-			"data":      data,
-			"timestamp": time.Now().Format(time.RFC3339),
-		})
-		return true
-	}
-	return false
-}
-
-// TCP Keepalive pinger - sends ping to DevKit every 30 seconds to prevent connection timeout
-func startTCPKeepalive() {
-	ticker := time.NewTicker(30 * time.Second)
-	for range ticker.C {
-		devkitMutex.RLock()
-		conn := devkitConn
-		auth := devkitAuthenticated
-		devkitMutex.RUnlock()
-
-		if conn != nil && auth {
-			if sendToDevKitRaw("ping") {
-				log.Println("[TCP] Sent keepalive ping to DevKit")
-			} else {
-				log.Println("[TCP] Failed to send keepalive ping")
-			}
-		}
+	// Write sample with correct duration for jitter buffer
+	err := track.WriteSample(media.Sample{
+		Data:     opusData,
+		Duration: time.Millisecond * time.Duration(frameSizeMs),
+	})
+	if err != nil {
+		log.Printf("[WEBRTC] Write sample error: %v", err)
 	}
 }
 
@@ -340,7 +259,8 @@ func startTCPServer() {
 		log.Fatalf("[TCP] Failed to start: %v", err)
 	}
 	log.Printf("[TCP] Server listening on port %s", tcpPort)
-	log.Printf("[TCP] DevKit should connect to: %s:%s", getLocalIP(), tcpPort)
+	localIP := getLocalIP()
+	log.Printf("[TCP] DevKit should connect to: %s:%s", localIP, tcpPort)
 
 	for {
 		conn, err := listener.Accept()
@@ -348,118 +268,163 @@ func startTCPServer() {
 			log.Printf("[TCP] Accept error: %v", err)
 			continue
 		}
-		go handleTCPConnection(conn)
+		log.Printf("[TCP] DevKit connecting: %s", conn.RemoteAddr())
+		go handleDevKitConnection(conn)
 	}
 }
 
-func handleTCPConnection(conn net.Conn) {
-	clientInfo := conn.RemoteAddr().String()
-	log.Printf("[TCP] DevKit connecting: %s", clientInfo)
+func handleDevKitConnection(conn net.Conn) {
+	defer conn.Close()
+
+	// Enable TCP keepalive at OS level
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetKeepAlive(true)
+		tcpConn.SetKeepAlivePeriod(30 * time.Second)
+	}
+
+	// Helper to send length-prefixed message
+	sendLengthPrefixed := func(msg string) {
+		msgBytes := []byte(msg)
+		lenBuf := make([]byte, 4)
+		binary.LittleEndian.PutUint32(lenBuf, uint32(len(msgBytes)))
+		conn.Write(append(lenBuf, msgBytes...))
+	}
+
+	// Helper to read length-prefixed message
+	readLengthPrefixed := func() (string, error) {
+		// Read 4-byte length header
+		header := make([]byte, 4)
+		_, err := io.ReadFull(conn, header)
+		if err != nil {
+			return "", err
+		}
+		msgLen := binary.LittleEndian.Uint32(header)
+		if msgLen > 4096 {
+			return "", fmt.Errorf("message too large: %d", msgLen)
+		}
+		// Read message body
+		body := make([]byte, msgLen)
+		_, err = io.ReadFull(conn, body)
+		if err != nil {
+			return "", err
+		}
+		return string(body), nil
+	}
+
+	// First message should be authentication (length-prefixed)
+	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	message, err := readLengthPrefixed()
+	if err != nil {
+		log.Printf("[TCP] Auth read failed: %v", err)
+		return
+	}
+
+	// Parse and validate token
+	message = strings.TrimSpace(message)
+	if !strings.HasPrefix(message, "auth:") {
+		log.Printf("[TCP] Invalid auth format from %s", conn.RemoteAddr())
+		sendLengthPrefixed("error:auth_required")
+		return
+	}
+
+	token := strings.TrimPrefix(message, "auth:")
+	if token != authToken {
+		log.Printf("[TCP] Invalid token from %s", conn.RemoteAddr())
+		sendLengthPrefixed("error:invalid_token")
+		return
+	}
+
+	// Auth successful
+	sendLengthPrefixed("auth:ok")
+	conn.SetReadDeadline(time.Time{})
+	log.Printf("[TCP] DevKit authenticated: %s", conn.RemoteAddr())
 
 	devkitMutex.Lock()
 	if devkitConn != nil {
 		devkitConn.Close()
 	}
 	devkitConn = conn
-	devkitAuthenticated = false
+	devkitAuthenticated = true
 	devkitMutex.Unlock()
 
+	broadcastToWeb(map[string]interface{}{
+		"type":      "devkit_status",
+		"connected": true,
+		"address":   conn.RemoteAddr().String(),
+	})
+
 	defer func() {
-		conn.Close()
 		devkitMutex.Lock()
 		if devkitConn == conn {
 			devkitConn = nil
 			devkitAuthenticated = false
 		}
 		devkitMutex.Unlock()
-		log.Printf("[TCP] DevKit disconnected: %s", clientInfo)
+
 		broadcastToWeb(map[string]interface{}{
 			"type":      "devkit_status",
 			"connected": false,
-			"timestamp": time.Now().Format(time.RFC3339),
 		})
 	}()
 
-	buffer := make([]byte, 0, 4096)
-	readBuf := make([]byte, 1024)
-
+	// Read messages from DevKit (length-prefixed)
 	for {
-		n, err := conn.Read(readBuf)
+		message, err := readLengthPrefixed()
 		if err != nil {
-			return
+			if err != io.EOF {
+				log.Printf("[TCP] Read error: %v", err)
+			}
+			break
 		}
-		buffer = append(buffer, readBuf[:n]...)
 
-		// Parse messages: [LEN:4bytes][DATA:LEN bytes]
-		for len(buffer) >= 4 {
-			msgLen := binary.LittleEndian.Uint32(buffer[:4])
-			if uint32(len(buffer)) < 4+msgLen {
-				break
-			}
-
-			rawMessage := buffer[4 : 4+msgLen]
-			buffer = buffer[4+msgLen:]
-
-			devkitMutex.RLock()
-			auth := devkitAuthenticated
-			devkitMutex.RUnlock()
-
-			if !auth {
-				message := string(rawMessage)
-				if strings.HasPrefix(message, "auth:") {
-					token := message[5:]
-					if token == authToken {
-						devkitMutex.Lock()
-						devkitAuthenticated = true
-						devkitMutex.Unlock()
-						log.Printf("[TCP] DevKit authenticated: %s", clientInfo)
-						sendToDevKitRaw("auth:ok")
-						broadcastToWeb(map[string]interface{}{
-							"type":          "devkit_status",
-							"connected":     true,
-							"authenticated": true,
-							"address":       conn.RemoteAddr().(*net.TCPAddr).IP.String(),
-							"timestamp":     time.Now().Format(time.RFC3339),
-						})
-					} else {
-						log.Printf("[TCP] DevKit auth failed: %s", clientInfo)
-						sendToDevKitRaw("auth:failed")
-						return
-					}
-				} else {
-					log.Printf("[TCP] DevKit not authenticated, ignoring: %s", message)
-					sendToDevKitRaw("auth:required")
-				}
-				continue
-			}
-
-			// Check for audio data
-			if len(rawMessage) > 6 && string(rawMessage[:6]) == "audio:" {
-				audioData := rawMessage[6:]
-				log.Printf("[TCP] Audio data received: %d bytes", len(audioData))
-				broadcastAudioToWeb(audioData)
-				continue
-			}
-
-			// Regular text message
-			message := string(rawMessage)
-			log.Printf("[TCP] Received from DevKit: %s", message)
-
-			if message == "pong" {
-				log.Println("[TCP] Keep-alive pong received")
-				continue
-			}
-
-			broadcastToWeb(map[string]interface{}{
-				"type":      "devkit_message",
-				"data":      message,
-				"timestamp": time.Now().Format(time.RFC3339),
-			})
+		message = strings.TrimSpace(message)
+		if message == "" {
+			continue
 		}
+
+		log.Printf("[TCP] Received from DevKit: %s", message)
+
+		if message == "pong" {
+			log.Printf("[TCP] Keep-alive pong received")
+			continue
+		}
+
+		broadcastToWeb(map[string]interface{}{
+			"type":      "devkit_message",
+			"data":      message,
+			"timestamp": time.Now().Format(time.RFC3339),
+		})
 	}
 }
 
-// ==================== UDP Server (G.711 Relay + Decoder) ====================
+func sendToDevKit(message string) error {
+	devkitMutex.RLock()
+	conn := devkitConn
+	authenticated := devkitAuthenticated
+	devkitMutex.RUnlock()
+
+	if conn == nil || !authenticated {
+		return fmt.Errorf("devkit not connected")
+	}
+
+	// Frame message with length prefix (4 bytes little-endian)
+	msgBytes := []byte(message)
+	lenBuf := make([]byte, 4)
+	binary.LittleEndian.PutUint32(lenBuf, uint32(len(msgBytes)))
+
+	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	_, err := conn.Write(append(lenBuf, msgBytes...))
+	conn.SetWriteDeadline(time.Time{})
+
+	if err != nil {
+		log.Printf("[TCP] Send error: %v", err)
+		return err
+	}
+	log.Printf("[TCP] Sent to DevKit: %s", message)
+	return nil
+}
+
+// ==================== UDP Server (Raw PCM to Opus/WebRTC) ====================
 
 func startUDPServer() {
 	addr, err := net.ResolveUDPAddr("udp", "0.0.0.0:"+udpPort)
@@ -470,7 +435,7 @@ func startUDPServer() {
 	if err != nil {
 		log.Fatalf("[UDP] Failed to start: %v", err)
 	}
-	log.Printf("[UDP] G.711 audio server listening on port %s", udpPort)
+	log.Printf("[UDP] Raw PCM audio server listening on port %s (jitter buffer enabled)", udpPort)
 
 	// Set larger buffer for better performance
 	conn.SetReadBuffer(1024 * 1024) // 1MB buffer
@@ -493,49 +458,78 @@ func startUDPServer() {
 			continue
 		}
 
-		// Minimum audio packet: 1 byte seq + 1 byte data
+		// Minimum audio packet: 1 byte seq + some PCM data
 		if n < 2 {
 			continue
 		}
 
 		// Extract sequence number (first byte)
 		seq := buf[0]
-		g711Data := buf[1:n]
+		pcmData := buf[1:n]
 
-		// Check for sequence discontinuity (jitter/packet loss detection)
+		// Check for sequence discontinuity
 		expectedSeq := udpLastSeq + 1
 		if udpPacketCount > 0 && seq != expectedSeq {
 			udpSeqJumps++
-			// Only log significant jumps to avoid spam
 			if udpSeqJumps%100 == 1 {
-				log.Printf("[UDP] Sequence jump detected: expected %d, got %d (total jumps: %d)",
+				log.Printf("[UDP] Sequence jump: expected %d, got %d (total: %d)",
 					expectedSeq, seq, udpSeqJumps)
 			}
 		}
 		udpLastSeq = seq
 
 		udpPacketCount++
-		if udpPacketCount%100 == 1 {
-			log.Printf("[UDP] G.711 packet #%d from %s: seq=%d, g711_bytes=%d",
-				udpPacketCount, remoteAddr, seq, len(g711Data))
+		if udpPacketCount%500 == 1 {
+			log.Printf("[UDP] PCM packet #%d from %s: seq=%d, pcm_bytes=%d, jitter_drops=%d",
+				udpPacketCount, remoteAddr, seq, len(pcmData), jitterDropCount)
 		}
 
-		// Make a copy of the raw packet for WebSocket broadcast
-		rawPacket := make([]byte, n)
-		copy(rawPacket, buf[:n])
+		// Convert bytes (Little Endian) to int16 samples
+		sampleCount := len(pcmData) / 2
+		if sampleCount > frameSizeSamples {
+			sampleCount = frameSizeSamples
+		}
 
-		// Broadcast raw G.711 (with seq) to WebSocket audio clients (low latency)
-		broadcastG711ToWSClients(rawPacket)
+		// Copy to new slice for jitter buffer
+		pcmFrame := make([]int16, sampleCount)
+		for i := 0; i < sampleCount; i++ {
+			pcmFrame[i] = int16(pcmData[i*2]) | int16(pcmData[i*2+1])<<8
+		}
 
-		// Also decode and broadcast to HTTP streaming clients (legacy fallback)
-		audioClientsMu.RLock()
-		httpClientCount := len(audioClients)
-		audioClientsMu.RUnlock()
+		// Non-blocking send to jitter buffer
+		select {
+		case jitterBuffer <- pcmFrame:
+			// Queued successfully
+		default:
+			// Buffer full - drop packet to maintain real-time
+			jitterDropCount++
+			if jitterDropCount%100 == 1 {
+				log.Printf("[JITTER] Buffer full, dropped %d packets", jitterDropCount)
+			}
+		}
+	}
+}
 
-		if httpClientCount > 0 {
-			pcmData := decodeG711ULaw(g711Data)
-			udpBytesDecoded += uint64(len(pcmData))
-			broadcastAudioToWeb(pcmData)
+// Pacer - reads from jitter buffer at steady 20ms intervals
+func startPacer() {
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+
+	log.Println("[PACER] Started - feeding WebRTC at 20ms intervals")
+
+	for range ticker.C {
+		select {
+		case pcmData := <-jitterBuffer:
+			// Encode to Opus
+			opusData, err := encodePCMToOpus(pcmData)
+			if err != nil {
+				continue
+			}
+			// Write to WebRTC track
+			writeAudioToTrack(opusData)
+
+		default:
+			// Buffer empty - let browser's PLC handle it
 		}
 	}
 }
@@ -558,83 +552,264 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		isAlive:       true,
 	}
 
+	// Check for session cookie
+	if cookie, err := r.Cookie("session"); err == nil {
+		if sessionID, valid := verifySession(cookie.Value); valid && validateSession(sessionID) {
+			client.authenticated = true
+			log.Printf("[WS] Web client authenticated: %s", clientIP)
+		}
+	}
+
 	wsClientsMu.Lock()
 	wsClients[client] = true
 	wsClientsMu.Unlock()
 
 	defer func() {
-		conn.Close()
 		wsClientsMu.Lock()
 		delete(wsClients, client)
 		wsClientsMu.Unlock()
+		conn.Close()
 		log.Printf("[WS] Web client disconnected: %s", clientIP)
 	}()
 
-	// Setup pong handler
-	conn.SetPongHandler(func(string) error {
-		client.isAlive = true
-		return nil
+	// Send auth status and current DevKit status
+	devkitMutex.RLock()
+	devkitConnected := devkitAuthenticated
+	devkitMutex.RUnlock()
+
+	if client.authenticated {
+		sendWSMessage(client, map[string]interface{}{
+			"type": "auth_success",
+			"devkit": map[string]interface{}{
+				"connected": devkitConnected,
+			},
+			"serverIP": getLocalIP(),
+			"tcpPort":  tcpPort,
+		})
+	} else {
+		sendWSMessage(client, map[string]interface{}{
+			"type": "auth_required",
+		})
+	}
+
+	sendWSMessage(client, map[string]interface{}{
+		"type":      "devkit_status",
+		"connected": devkitConnected,
 	})
 
-	// Send auth required
-	conn.WriteJSON(map[string]string{"type": "auth_required"})
-
+	// Read messages from web client
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
-			return
+			break
 		}
 
-		var message map[string]interface{}
-		if err := json.Unmarshal(msg, &message); err != nil {
-			log.Printf("[WS] Parse error: %v", err)
+		var data map[string]interface{}
+		if err := json.Unmarshal(msg, &data); err != nil {
 			continue
 		}
 
-		msgType, _ := message["type"].(string)
+		log.Printf("[WS] Received from web: %v", data)
 
-		if msgType == "auth" {
-			token, _ := message["token"].(string)
-			if token == authToken {
-				client.authenticated = true
-				log.Printf("[WS] Web client authenticated: %s", clientIP)
+		msgType, _ := data["type"].(string)
 
-				devkitMutex.RLock()
-				connected := devkitConn != nil && devkitAuthenticated
-				devkitMutex.RUnlock()
-
-				conn.WriteJSON(map[string]interface{}{
-					"type": "auth_success",
-					"devkit": map[string]bool{
-						"connected": connected,
-					},
-					"serverIP": getLocalIP(),
-					"tcpPort":  tcpPort,
-				})
-			} else {
-				log.Printf("[WS] Web client auth failed: %s", clientIP)
-				conn.WriteJSON(map[string]string{"type": "auth_failed"})
-				return
-			}
-			continue
-		}
-
-		if !client.authenticated {
-			conn.WriteJSON(map[string]string{"type": "auth_required"})
-			continue
-		}
-
-		log.Printf("[WS] Received from web: %v", message)
-
-		if msgType == "send_to_devkit" {
-			if data, ok := message["data"].(string); ok {
-				sendToDevKit(data)
+		switch msgType {
+		case "ping":
+			// Respond to keepalive ping
+			sendWSMessage(client, map[string]interface{}{
+				"type": "pong",
+			})
+		case "send_to_devkit":
+			if cmd, ok := data["data"].(string); ok {
+				if err := sendToDevKit(cmd); err != nil {
+					sendWSMessage(client, map[string]interface{}{
+						"type":  "error",
+						"error": err.Error(),
+					})
+				}
 			}
 		}
 	}
 }
 
-// WebSocket ping goroutine
+func sendWSMessage(client *WSClient, data map[string]interface{}) {
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	client.conn.WriteJSON(data)
+}
+
+func broadcastToWeb(data map[string]interface{}) {
+	wsClientsMu.RLock()
+	defer wsClientsMu.RUnlock()
+
+	for client := range wsClients {
+		sendWSMessage(client, data)
+	}
+}
+
+func broadcastAudioToWeb(pcm []byte) {
+	audioClientsMu.RLock()
+	defer audioClientsMu.RUnlock()
+
+	for ch := range audioClients {
+		select {
+		case ch <- pcm:
+		default:
+			// Channel full, skip
+		}
+	}
+}
+
+// ==================== WebRTC Signaling ====================
+
+func handleWebRTCOffer(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var offer webrtc.SessionDescription
+	if err := json.NewDecoder(r.Body).Decode(&offer); err != nil {
+		http.Error(w, "Invalid offer: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Create peer connection with STUN + self-hosted TURN server
+	config := webrtc.Configuration{
+		ICEServers: []webrtc.ICEServer{
+			// Google's free STUN (works for ~80% of connections)
+			{URLs: []string{"stun:stun.l.google.com:19302"}},
+			{URLs: []string{"stun:stun1.l.google.com:19302"}},
+			// Self-hosted TURN server on VPS (relay for remaining ~20%)
+			{
+				URLs:       []string{"turn:13.212.218.43:3478"},
+				Username:   "turnuser",
+				Credential: "TuyaT5DevKit2024",
+			},
+			{
+				URLs:       []string{"turn:13.212.218.43:3478?transport=tcp"},
+				Username:   "turnuser",
+				Credential: "TuyaT5DevKit2024",
+			},
+		},
+	}
+
+	peerConnection, err := webrtc.NewPeerConnection(config)
+	if err != nil {
+		http.Error(w, "Failed to create peer connection: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Track peer connections
+	peerConnectionsMu.Lock()
+	peerConnections[peerConnection] = true
+	log.Printf("[WEBRTC] New peer connection, total: %d", len(peerConnections))
+	peerConnectionsMu.Unlock()
+
+	// Handle connection state changes
+	peerConnection.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		log.Printf("[WEBRTC] Connection state: %s", state.String())
+		if state == webrtc.PeerConnectionStateFailed ||
+			state == webrtc.PeerConnectionStateClosed ||
+			state == webrtc.PeerConnectionStateDisconnected {
+			peerConnectionsMu.Lock()
+			delete(peerConnections, peerConnection)
+			log.Printf("[WEBRTC] Peer removed, remaining: %d", len(peerConnections))
+			peerConnectionsMu.Unlock()
+		}
+	})
+
+	// Log ICE connection state
+	peerConnection.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		log.Printf("[WEBRTC] ICE connection state: %s", state.String())
+	})
+
+	// Log ICE candidates for debugging
+	peerConnection.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c != nil {
+			log.Printf("[WEBRTC] ICE candidate: %s", c.String())
+		}
+	})
+
+	// Log ICE gathering state
+	peerConnection.OnICEGatheringStateChange(func(state webrtc.ICEGathererState) {
+		log.Printf("[WEBRTC] ICE gathering state: %s", state.String())
+	})
+
+	// Add the audio track
+	audioTrackMutex.RLock()
+	track := audioTrack
+	audioTrackMutex.RUnlock()
+
+	if track != nil {
+		_, err = peerConnection.AddTrack(track)
+		if err != nil {
+			http.Error(w, "Failed to add track: "+err.Error(), http.StatusInternalServerError)
+			peerConnection.Close()
+			return
+		}
+	}
+
+	// Set remote description (offer from client)
+	if err := peerConnection.SetRemoteDescription(offer); err != nil {
+		http.Error(w, "Failed to set remote description: "+err.Error(), http.StatusBadRequest)
+		peerConnection.Close()
+		return
+	}
+
+	// Create answer
+	answer, err := peerConnection.CreateAnswer(nil)
+	if err != nil {
+		http.Error(w, "Failed to create answer: "+err.Error(), http.StatusInternalServerError)
+		peerConnection.Close()
+		return
+	}
+
+	// Gather ICE candidates
+	gatherComplete := webrtc.GatheringCompletePromise(peerConnection)
+
+	// Set local description
+	if err := peerConnection.SetLocalDescription(answer); err != nil {
+		http.Error(w, "Failed to set local description: "+err.Error(), http.StatusInternalServerError)
+		peerConnection.Close()
+		return
+	}
+
+	// Wait for ICE gathering to complete
+	select {
+	case <-gatherComplete:
+	case <-time.After(10 * time.Second):
+		log.Printf("[WEBRTC] ICE gathering timeout")
+	}
+
+	// Send answer with ICE candidates
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(peerConnection.LocalDescription())
+	log.Printf("[WEBRTC] Answer sent to client")
+}
+
+// ==================== TCP Keepalive ====================
+
+func startTCPKeepalive() {
+	ticker := time.NewTicker(30 * time.Second)
+	for range ticker.C {
+		devkitMutex.RLock()
+		conn := devkitConn
+		authenticated := devkitAuthenticated
+		devkitMutex.RUnlock()
+
+		if conn != nil && authenticated {
+			if err := sendToDevKit("ping"); err != nil {
+				log.Printf("[TCP] Keepalive failed: %v", err)
+			} else {
+				log.Printf("[TCP] Sent keepalive ping to DevKit")
+			}
+		}
+	}
+}
+
+// ==================== WebSocket Pinger ====================
+
 func startWSPinger() {
 	ticker := time.NewTicker(30 * time.Second)
 	for range ticker.C {
@@ -646,96 +821,22 @@ func startWSPinger() {
 		wsClientsMu.RUnlock()
 
 		for _, client := range clients {
+			client.mu.Lock()
 			if !client.isAlive {
-				log.Println("[WS] Client not responding to ping, terminating")
 				client.conn.Close()
+				client.mu.Unlock()
 				continue
 			}
 			client.isAlive = false
-			client.mu.Lock()
+			client.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			client.conn.WriteMessage(websocket.PingMessage, nil)
+			client.conn.SetWriteDeadline(time.Time{})
 			client.mu.Unlock()
 		}
 	}
 }
 
-// ==================== WebSocket Audio Handler (Low Latency) ====================
-
-func handleAudioWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("[WS-AUDIO] Upgrade error: %v", err)
-		return
-	}
-
-	clientIP := r.RemoteAddr
-	log.Printf("[WS-AUDIO] Client connected: %s", clientIP)
-
-	client := &AudioWSClient{
-		conn: conn,
-	}
-
-	audioWSClientsMu.Lock()
-	audioWSClients[client] = true
-	count := len(audioWSClients)
-	audioWSClientsMu.Unlock()
-
-	log.Printf("[WS-AUDIO] Total clients: %d", count)
-
-	defer func() {
-		conn.Close()
-		audioWSClientsMu.Lock()
-		delete(audioWSClients, client)
-		count := len(audioWSClients)
-		audioWSClientsMu.Unlock()
-		log.Printf("[WS-AUDIO] Client disconnected: %s (remaining: %d)", clientIP, count)
-	}()
-
-	// Keep connection open until client disconnects
-	// Client only receives data, doesn't send anything meaningful
-	for {
-		_, _, err := conn.ReadMessage()
-		if err != nil {
-			break
-		}
-	}
-}
-
 // ==================== HTTP Handlers ====================
-
-func authMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Allow WebSocket upgrades without session auth (they have token auth)
-		if r.Header.Get("Upgrade") == "websocket" {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		// Public paths
-		publicPaths := []string{"/login.html", "/api/login", "/api/check-auth", "/health"}
-		for _, p := range publicPaths {
-			if r.URL.Path == p || strings.HasPrefix(r.URL.Path, p) {
-				next.ServeHTTP(w, r)
-				return
-			}
-		}
-
-		sessionID := getSessionFromCookie(r)
-		if validateSession(sessionID) {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		if strings.HasPrefix(r.URL.Path, "/api/") {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Not authenticated"})
-			return
-		}
-
-		http.Redirect(w, r, "/login.html?redirect="+r.URL.Path, http.StatusFound)
-	})
-}
 
 func handleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
@@ -747,124 +848,109 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
+
 	if err := json.NewDecoder(r.Body).Decode(&creds); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-
-	if creds.Username == authUsername && creds.Password == authPassword {
-		sessionID := generateRandomHex(32)
-		sessionMutex.Lock()
-		sessions[sessionID] = &Session{
-			Username:  creds.Username,
-			CreatedAt: time.Now(),
-		}
-		sessionMutex.Unlock()
-
-		http.SetCookie(w, &http.Cookie{
-			Name:     "session",
-			Value:    signSession(sessionID),
-			Path:     "/",
-			HttpOnly: true,
-			MaxAge:   86400, // 24 hours
-			SameSite: http.SameSiteLaxMode,
-		})
-
-		log.Printf("[AUTH] User logged in: %s", creds.Username)
-		json.NewEncoder(w).Encode(map[string]bool{"success": true})
+	if creds.Username != authUsername || creds.Password != authPassword {
+		log.Printf("[AUTH] Failed login for: %s", creds.Username)
+		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 		return
 	}
 
-	log.Printf("[AUTH] Failed login attempt for: %s", creds.Username)
-	w.WriteHeader(http.StatusUnauthorized)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": false,
-		"error":   "Invalid username or password",
-	})
-}
-
-func handleCheckAuth(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	sessionID := getSessionFromCookie(r)
-	if validateSession(sessionID) {
-		sessionMutex.RLock()
-		session := sessions[sessionID]
-		sessionMutex.RUnlock()
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"authenticated": true,
-			"username":      session.Username,
-		})
-		return
+	// Create session
+	sessionID := generateRandomHex(32)
+	sessionMutex.Lock()
+	sessions[sessionID] = &Session{
+		Username:  creds.Username,
+		CreatedAt: time.Now(),
 	}
-	w.WriteHeader(http.StatusUnauthorized)
-	json.NewEncoder(w).Encode(map[string]bool{"authenticated": false})
-}
+	sessionMutex.Unlock()
 
-func handleLogout(w http.ResponseWriter, r *http.Request) {
-	sessionID := getSessionFromCookie(r)
-	if sessionID != "" {
-		sessionMutex.Lock()
-		delete(sessions, sessionID)
-		sessionMutex.Unlock()
-	}
+	signedSession := signSession(sessionID)
 	http.SetCookie(w, &http.Cookie{
-		Name:   "session",
-		Value:  "",
-		Path:   "/",
-		MaxAge: -1,
+		Name:     "session",
+		Value:    signedSession,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   r.TLS != nil,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   86400, // 24 hours
 	})
-	log.Println("[AUTH] User logged out")
+
+	log.Printf("[AUTH] User logged in: %s", creds.Username)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
-func handleHealth(w http.ResponseWriter, r *http.Request) {
+func handleCheckAuth(w http.ResponseWriter, r *http.Request) {
+	cookie, err := r.Cookie("session")
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]bool{"authenticated": false})
+		return
+	}
+
+	sessionID, valid := verifySession(cookie.Value)
+	authenticated := valid && validateSession(sessionID)
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":    "ok",
-		"timestamp": time.Now().Format(time.RFC3339),
+	if !authenticated {
+		w.WriteHeader(http.StatusUnauthorized)
+	}
+	json.NewEncoder(w).Encode(map[string]bool{"authenticated": authenticated})
+}
+
+func handleLogout(w http.ResponseWriter, r *http.Request) {
+	if cookie, err := r.Cookie("session"); err == nil {
+		if sessionID, valid := verifySession(cookie.Value); valid {
+			sessionMutex.Lock()
+			delete(sessions, sessionID)
+			sessionMutex.Unlock()
+		}
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "session",
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		MaxAge:   -1,
 	})
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
 func handleStatus(w http.ResponseWriter, r *http.Request) {
 	devkitMutex.RLock()
-	connected := devkitConn != nil
-	auth := devkitAuthenticated
+	connected := devkitAuthenticated
 	var addr string
 	if devkitConn != nil {
-		addr = devkitConn.RemoteAddr().(*net.TCPAddr).IP.String()
+		addr = devkitConn.RemoteAddr().String()
 	}
 	devkitMutex.RUnlock()
 
-	wsClientsMu.RLock()
-	wsCount := len(wsClients)
-	wsClientsMu.RUnlock()
-
-	audioClientsMu.RLock()
-	audioCount := len(audioClients)
-	audioClientsMu.RUnlock()
+	peerConnectionsMu.RLock()
+	webrtcClients := len(peerConnections)
+	peerConnectionsMu.RUnlock()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"devkit": map[string]interface{}{
-			"connected":     connected,
-			"authenticated": auth,
-			"address":       addr,
+			"connected": connected,
+			"address":   addr,
 		},
-		"server": map[string]interface{}{
-			"ip":       getLocalIP(),
-			"httpPort": httpPort,
-			"tcpPort":  tcpPort,
-			"udpPort":  udpPort,
+		"audio": map[string]interface{}{
+			"packets":        udpPacketCount,
+			"sequenceJumps":  udpSeqJumps,
+			"keepalivePings": udpPingCount,
 		},
-		"webClients":   wsCount,
-		"audioClients": audioCount,
-		"udpStats": map[string]interface{}{
-			"packets":      udpPacketCount,
-			"seqJumps":     udpSeqJumps,
-			"bytesDecoded": udpBytesDecoded,
+		"webrtc": map[string]interface{}{
+			"clients": webrtcClients,
 		},
 	})
 }
@@ -881,74 +967,123 @@ func handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Message string `json:"message"`
+		Command string `json:"command"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	if req.Message == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": false,
-			"error":   "No message provided",
-		})
+	if err := sendToDevKit(req.Command); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 
-	sent := sendToDevKit(req.Message)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": sent,
-		"message": map[bool]string{true: "Message sent", false: "DevKit not connected"}[sent],
-	})
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+}
+
+func handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 func handleAudioStream(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Cache-Control", "no-cache, no-store")
-	w.Header().Set("Connection", "keep-alive")
-	// Updated format info: 16kHz sample rate from G.711 decoded audio
-	w.Header().Set("X-Audio-Format", "pcm-s16le-16000hz-mono")
+	w.Header().Set("Content-Type", "audio/x-wav")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Transfer-Encoding", "chunked")
 
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
-		return
-	}
+	ch := make(chan []byte, 100)
 
-	// Create buffered channel for this client
-	ch := make(chan []byte, 200) // Larger buffer for G.711 streams
 	audioClientsMu.Lock()
 	audioClients[ch] = true
+	log.Printf("[AUDIO] HTTP client connected, total: %d", len(audioClients))
 	audioClientsMu.Unlock()
-	log.Printf("[AUDIO] Client connected, total: %d", len(audioClients))
 
 	defer func() {
 		audioClientsMu.Lock()
 		delete(audioClients, ch)
+		log.Printf("[AUDIO] HTTP client disconnected, remaining: %d", len(audioClients))
 		audioClientsMu.Unlock()
 		close(ch)
-		log.Printf("[AUDIO] Client disconnected, total: %d", len(audioClients))
 	}()
 
-	// Use context for cancellation
-	ctx := r.Context()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case data, ok := <-ch:
-			if !ok {
-				return
-			}
-			if _, err := w.Write(data); err != nil {
-				return
-			}
-			flusher.Flush()
-		}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
 	}
+
+	for data := range ch {
+		if _, err := w.Write(data); err != nil {
+			break
+		}
+		flusher.Flush()
+	}
+}
+
+// ==================== Auth Middleware ====================
+
+func authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+
+		// Public endpoints
+		publicPaths := []string{
+			"/login.html",
+			"/api/login",
+			"/api/check-auth",
+			"/health",
+			"/webrtc-offer", // Allow WebRTC signaling
+		}
+
+		for _, p := range publicPaths {
+			if path == p {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+
+		// Allow static assets
+		if strings.HasPrefix(path, "/assets/") ||
+			strings.HasSuffix(path, ".css") ||
+			strings.HasSuffix(path, ".js") ||
+			strings.HasSuffix(path, ".ico") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Allow WebSocket upgrades
+		if r.Header.Get("Upgrade") == "websocket" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Check session cookie
+		cookie, err := r.Cookie("session")
+		if err != nil {
+			if !strings.HasPrefix(path, "/api/") {
+				http.Redirect(w, r, "/login.html", http.StatusFound)
+				return
+			}
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		sessionID, valid := verifySession(cookie.Value)
+		if !valid || !validateSession(sessionID) {
+			if !strings.HasPrefix(path, "/api/") {
+				http.Redirect(w, r, "/login.html", http.StatusFound)
+				return
+			}
+			http.Error(w, "Session expired", http.StatusUnauthorized)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 // ==================== Main ====================
@@ -956,16 +1091,29 @@ func handleAudioStream(w http.ResponseWriter, r *http.Request) {
 func main() {
 	localIP := getLocalIP()
 
+	// Initialize Opus encoder
+	if err := initOpusEncoder(); err != nil {
+		log.Fatalf("Failed to init Opus: %v", err)
+	}
+
+	// Initialize WebRTC track
+	if err := initWebRTCTrack(); err != nil {
+		log.Fatalf("Failed to init WebRTC: %v", err)
+	}
+
 	// Start TCP server
 	go startTCPServer()
 
-	// Start UDP server (with G.711 decoding)
+	// Start UDP server (Raw PCM -> Jitter Buffer)
 	go startUDPServer()
+
+	// Start Pacer (Jitter Buffer -> Opus -> WebRTC at steady 20ms)
+	go startPacer()
 
 	// Start WebSocket pinger
 	go startWSPinger()
 
-	// Start TCP keepalive pinger (prevents connection timeout)
+	// Start TCP keepalive pinger
 	go startTCPKeepalive()
 
 	// Setup HTTP routes
@@ -978,14 +1126,12 @@ func main() {
 	}
 	fs := http.FileServer(http.Dir(publicDir))
 
-	// Root handler - WebSocket upgrade or static files
+	// Root handler
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Check if this is a WebSocket upgrade request
 		if r.Header.Get("Upgrade") == "websocket" {
 			handleWebSocket(w, r)
 			return
 		}
-		// Otherwise serve static files
 		fs.ServeHTTP(w, r)
 	})
 
@@ -997,8 +1143,8 @@ func main() {
 	mux.HandleFunc("/api/token", handleToken)
 	mux.HandleFunc("/api/send", handleSend)
 	mux.HandleFunc("/health", handleHealth)
-	mux.HandleFunc("/audio-stream", handleAudioStream) // HTTP streaming (legacy)
-	mux.HandleFunc("/ws-audio", handleAudioWebSocket)  // WebSocket audio (low latency)
+	mux.HandleFunc("/audio-stream", handleAudioStream)
+	mux.HandleFunc("/webrtc-offer", handleWebRTCOffer)
 
 	// Redirect /ble to /ble/index.html
 	mux.HandleFunc("/ble", func(w http.ResponseWriter, r *http.Request) {
@@ -1010,11 +1156,11 @@ func main() {
 
 	fmt.Println()
 	fmt.Println(strings.Repeat("=", 60))
-	fmt.Println("  DevKit Communication Server (G.711 Audio)")
+	fmt.Println("  DevKit Communication Server (WebRTC/Opus Audio)")
 	fmt.Println(strings.Repeat("=", 60))
 	fmt.Printf("  Web UI + WS: http://%s:%s\n", localIP, httpPort)
 	fmt.Printf("  TCP Server:  %s:%s (for DevKit commands)\n", localIP, tcpPort)
-	fmt.Printf("  UDP Server:  %s:%s (for G.711 audio)\n", localIP, udpPort)
+	fmt.Printf("  UDP Server:  %s:%s (for raw PCM audio)\n", localIP, udpPort)
 	fmt.Println()
 	fmt.Printf("  Auth Username: %s\n", authUsername)
 	fmt.Printf("  Auth Password: %s\n", strings.Repeat("*", len(authPassword)))

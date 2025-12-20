@@ -1,14 +1,15 @@
 /**
  * @file udp_audio.h
- * @brief UDP Audio streaming with G.711 encoding
+ * @brief UDP Audio streaming with raw PCM for WebRTC/Opus
  * 
- * Sends audio encoded as G.711 u-law over UDP for low-latency streaming.
- * G.711 encoding provides:
- * - 50% bandwidth reduction (8-bit vs 16-bit)
- * - Robust packet handling (1 byte = 1 sample, no alignment issues)
- * - Sequence numbers for ordering and jitter detection
+ * Sends raw PCM audio over UDP for server-side Opus encoding and WebRTC streaming.
+ * The server handles Opus encoding and WebRTC, providing:
+ * - WebRTC jitter buffer for packet loss recovery
+ * - Opus compression (~24kbps output)
+ * - Native browser playback (no custom decoder needed)
  * 
- * Packet format: [SEQ:1byte][G711_DATA:Nbytes]
+ * Packet format: [SEQ:1byte][PCM_DATA:640bytes]
+ * PCM is 16kHz, 16-bit, mono = 320 samples * 2 bytes = 640 bytes per 20ms frame
  */
 
 #ifndef __UDP_AUDIO_H__
@@ -25,10 +26,10 @@
 OPERATE_RET udp_audio_init(const char *host, uint16_t port);
 
 /**
- * @brief Send raw PCM audio data via UDP (with G.711 encoding)
+ * @brief Send raw PCM audio data via UDP (for server-side Opus encoding)
  * 
- * This function encodes the PCM data to G.711 u-law, adds a sequence
- * number, and sends the packet via UDP.
+ * This function sends raw PCM data with a sequence number.
+ * The server will encode to Opus and stream via WebRTC.
  * 
  * @param pcm_data PCM 16-bit audio samples
  * @param pcm_samples Number of samples (not bytes!)
@@ -37,11 +38,10 @@ OPERATE_RET udp_audio_init(const char *host, uint16_t port);
 OPERATE_RET udp_audio_send_pcm(const int16_t *pcm_data, uint32_t pcm_samples);
 
 /**
- * @brief Send raw audio data via UDP (legacy, no encoding)
+ * @brief Send raw audio data via UDP (legacy)
  * @param data Raw audio data
  * @param len Data length
  * @return OPRT_OK on success
- * @deprecated Use udp_audio_send_pcm() for proper G.711 encoding
  */
 OPERATE_RET udp_audio_send(const uint8_t *data, uint32_t len);
 

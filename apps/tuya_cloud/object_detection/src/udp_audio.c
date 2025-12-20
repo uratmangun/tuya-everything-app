@@ -1,19 +1,19 @@
 /**
  * @file udp_audio.c
- * @brief UDP Audio streaming with G.711 u-law encoding
+ * @brief UDP Audio streaming with raw PCM for WebRTC/Opus encoding on server
  * 
- * Sends audio encoded as G.711 u-law over UDP for low-latency streaming.
+ * Sends raw PCM audio over UDP for server-side Opus encoding and WebRTC streaming.
  * 
- * Packet format: [SEQ:1byte][G711_DATA:Nbytes]
+ * Packet format: [SEQ:1byte][PCM_DATA:640bytes]
  * 
- * Benefits of G.711:
- * - 50% bandwidth reduction (8-bit vs 16-bit)
- * - 1 byte = 1 sample (no byte alignment issues if packet dropped)
- * - Sequence numbers detect out-of-order/missing packets
+ * Benefits of raw PCM + server-side Opus:
+ * - Best audio quality (uncompressed source for Opus encoder)
+ * - WebRTC jitter buffer handles packet loss and reordering
+ * - Browser native playback (no custom decoder needed)
+ * - Keeps firmware simple, complexity on VPS
  */
 
 #include "udp_audio.h"
-#include "g711_codec.h"
 #include "tal_api.h"
 #include "tal_network.h"
 #include <string.h>
@@ -21,8 +21,8 @@
 /***********************************************************
 ***********************macro define************************
 ***********************************************************/
-/* Max packet size: 1 byte seq + 320 bytes G.711 (20ms at 16kHz) */
-#define UDP_PACKET_MAX_SIZE 512
+/* Max packet size: 1 byte seq + 640 bytes PCM (320 samples * 2 bytes = 20ms at 16kHz) */
+#define UDP_PACKET_MAX_SIZE 700
 
 /***********************************************************
 ***********************typedef define***********************
@@ -86,19 +86,22 @@ OPERATE_RET udp_audio_send_pcm(const int16_t *pcm_data, uint32_t pcm_samples)
         return OPRT_SOCK_ERR;
     }
     
-    if (pcm_samples == 0 || pcm_samples > (UDP_PACKET_MAX_SIZE - 1)) {
-        PR_ERR("Invalid PCM sample count: %u", pcm_samples);
+    /* Calculate PCM byte size (2 bytes per sample) */
+    uint32_t pcm_bytes = pcm_samples * 2;
+    
+    if (pcm_samples == 0 || pcm_bytes > (UDP_PACKET_MAX_SIZE - 1)) {
+        PR_ERR("Invalid PCM sample count: %u (bytes: %u)", pcm_samples, pcm_bytes);
         return OPRT_INVALID_PARM;
     }
     
-    /* Build packet: [SEQ:1][G711_DATA:N] */
+    /* Build packet: [SEQ:1][PCM_DATA:N] - Raw PCM for server-side Opus encoding */
     g_send_buf[0] = g_udp.seq;
     
-    /* Encode PCM to G.711 u-law */
-    size_t g711_len = g711_encode_ulaw(pcm_data, pcm_samples, &g_send_buf[1]);
+    /* Copy raw PCM data (no encoding - server will encode to Opus) */
+    memcpy(&g_send_buf[1], pcm_data, pcm_bytes);
     
-    /* Total packet size: 1 byte seq + G.711 data */
-    uint32_t packet_len = 1 + g711_len;
+    /* Total packet size: 1 byte seq + PCM data */
+    uint32_t packet_len = 1 + pcm_bytes;
     
     int sent = tal_net_send_to(g_udp.socket_fd, (void *)g_send_buf, packet_len, 
                                 g_udp.server_addr, g_udp.server_port);
@@ -114,7 +117,7 @@ OPERATE_RET udp_audio_send_pcm(const int16_t *pcm_data, uint32_t pcm_samples)
     
     /* Log stats every 500 packets (~5 seconds at 100 packets/sec) */
     if (g_udp.packets_sent % 500 == 0) {
-        PR_INFO("UDP audio: %u packets sent, seq=%u, last_size=%u", 
+        PR_INFO("UDP PCM audio: %u packets sent, seq=%u, last_size=%u bytes", 
                 g_udp.packets_sent, g_udp.seq, packet_len);
     }
     
