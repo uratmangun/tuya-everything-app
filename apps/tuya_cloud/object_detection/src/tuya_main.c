@@ -98,6 +98,11 @@ char g_tcp_host[64] = "";
 /* for cli command register */
 extern void tuya_app_cli_init(void);
 
+/* Disable vendor VAD (Voice Activity Detection) to prevent mic from stopping
+ * after silence is detected. Without this, the T5AI platform automatically
+ * stops sending mic data ~5 seconds after it detects no voice activity. */
+extern void tkl_ai_disable_vendor_vad(void);
+
 /* Board hardware registration (audio driver, etc.) */
 extern OPERATE_RET board_register_hardware(void);
 
@@ -538,6 +543,15 @@ void user_main(void)
 
     /* Register board hardware (audio driver, button, LED) */
     PR_INFO("Registering board hardware...");
+    
+    /* CRITICAL FIX: Disable vendor VAD before audio init!
+     * The T5AI platform has built-in Voice Activity Detection that automatically
+     * stops sending mic data to the application layer after ~5 seconds of
+     * detecting no voice activity. This caused the "Mic driver stalled" error.
+     * We must disable this BEFORE the audio driver is initialized. */
+    PR_NOTICE("Disabling vendor VAD to prevent mic stalling...");
+    tkl_ai_disable_vendor_vad();
+    
     rt = board_register_hardware();
     if (rt != OPRT_OK) {
         PR_ERR("Failed to register board hardware: %d", rt);
