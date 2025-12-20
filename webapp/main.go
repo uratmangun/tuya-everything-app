@@ -1,5 +1,5 @@
 // DevKit Communication Server in Go
-// Provides: TCP (5000), UDP (5001), HTTP+WebSocket (3000)
+// Provides: TCP (5000), UDP (5001 with G.711 decoding), HTTP+WebSocket (3000)
 package main
 
 import (
@@ -67,15 +67,80 @@ var (
 	}
 )
 
-// Audio stream clients (HTTP chunked)
+// Audio stream clients (HTTP chunked - legacy fallback)
 var (
 	audioClients   = make(map[chan []byte]bool)
 	audioClientsMu sync.RWMutex
 )
 
-// UDP packet counter
-var udpPacketCount uint64
+// Audio WebSocket clients (low-latency G.711 push)
+type AudioWSClient struct {
+	conn *websocket.Conn
+	mu   sync.Mutex
+}
 
+var (
+	audioWSClients   = make(map[*AudioWSClient]bool)
+	audioWSClientsMu sync.RWMutex
+)
+
+// UDP packet statistics
+var (
+	udpPacketCount  uint64
+	udpLastSeq      uint8
+	udpSeqJumps     uint64
+	udpBytesDecoded uint64
+	udpPingCount    uint64
+)
+
+// ==================== G.711 u-law Decoder ====================
+// G.711 u-law decoding table (converts 8-bit u-law to 16-bit PCM)
+var ulawToLinear = [256]int16{
+	-32124, -31100, -30076, -29052, -28028, -27004, -25980, -24956,
+	-23932, -22908, -21884, -20860, -19836, -18812, -17788, -16764,
+	-15996, -15484, -14972, -14460, -13948, -13436, -12924, -12412,
+	-11900, -11388, -10876, -10364, -9852, -9340, -8828, -8316,
+	-7932, -7676, -7420, -7164, -6908, -6652, -6396, -6140,
+	-5884, -5628, -5372, -5116, -4860, -4604, -4348, -4092,
+	-3900, -3772, -3644, -3516, -3388, -3260, -3132, -3004,
+	-2876, -2748, -2620, -2492, -2364, -2236, -2108, -1980,
+	-1884, -1820, -1756, -1692, -1628, -1564, -1500, -1436,
+	-1372, -1308, -1244, -1180, -1116, -1052, -988, -924,
+	-876, -844, -812, -780, -748, -716, -684, -652,
+	-620, -588, -556, -524, -492, -460, -428, -396,
+	-372, -356, -340, -324, -308, -292, -276, -260,
+	-244, -228, -212, -196, -180, -164, -148, -132,
+	-120, -112, -104, -96, -88, -80, -72, -64,
+	-56, -48, -40, -32, -24, -16, -8, 0,
+	32124, 31100, 30076, 29052, 28028, 27004, 25980, 24956,
+	23932, 22908, 21884, 20860, 19836, 18812, 17788, 16764,
+	15996, 15484, 14972, 14460, 13948, 13436, 12924, 12412,
+	11900, 11388, 10876, 10364, 9852, 9340, 8828, 8316,
+	7932, 7676, 7420, 7164, 6908, 6652, 6396, 6140,
+	5884, 5628, 5372, 5116, 4860, 4604, 4348, 4092,
+	3900, 3772, 3644, 3516, 3388, 3260, 3132, 3004,
+	2876, 2748, 2620, 2492, 2364, 2236, 2108, 1980,
+	1884, 1820, 1756, 1692, 1628, 1564, 1500, 1436,
+	1372, 1308, 1244, 1180, 1116, 1052, 988, 924,
+	876, 844, 812, 780, 748, 716, 684, 652,
+	620, 588, 556, 524, 492, 460, 428, 396,
+	372, 356, 340, 324, 308, 292, 276, 260,
+	244, 228, 212, 196, 180, 164, 148, 132,
+	120, 112, 104, 96, 88, 80, 72, 64,
+	56, 48, 40, 32, 24, 16, 8, 0,
+}
+
+// decodeG711ULaw decodes G.711 u-law bytes to 16-bit PCM
+func decodeG711ULaw(ulaw []byte) []byte {
+	pcm := make([]byte, len(ulaw)*2)
+	for i, u := range ulaw {
+		sample := ulawToLinear[u]
+		// Little-endian 16-bit
+		pcm[i*2] = byte(sample & 0xFF)
+		pcm[i*2+1] = byte((sample >> 8) & 0xFF)
+	}
+	return pcm
+}
 
 func getEnv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
@@ -191,6 +256,21 @@ func broadcastAudioToWeb(data []byte) {
 	}
 }
 
+// Broadcast raw G.711 data to WebSocket audio clients (low latency)
+func broadcastG711ToWSClients(data []byte) {
+	audioWSClientsMu.RLock()
+	defer audioWSClientsMu.RUnlock()
+	for client := range audioWSClients {
+		client.mu.Lock()
+		err := client.conn.WriteMessage(websocket.BinaryMessage, data)
+		client.mu.Unlock()
+		if err != nil {
+			// Mark for removal but don't remove during iteration
+			log.Printf("[WS-AUDIO] Write error: %v", err)
+		}
+	}
+}
+
 // ==================== DevKit TCP Communication ====================
 
 func sendToDevKitRaw(data string) bool {
@@ -233,6 +313,24 @@ func sendToDevKit(data string) bool {
 	return false
 }
 
+// TCP Keepalive pinger - sends ping to DevKit every 30 seconds to prevent connection timeout
+func startTCPKeepalive() {
+	ticker := time.NewTicker(30 * time.Second)
+	for range ticker.C {
+		devkitMutex.RLock()
+		conn := devkitConn
+		auth := devkitAuthenticated
+		devkitMutex.RUnlock()
+
+		if conn != nil && auth {
+			if sendToDevKitRaw("ping") {
+				log.Println("[TCP] Sent keepalive ping to DevKit")
+			} else {
+				log.Println("[TCP] Failed to send keepalive ping")
+			}
+		}
+	}
+}
 
 // ==================== TCP Server ====================
 
@@ -361,8 +459,7 @@ func handleTCPConnection(conn net.Conn) {
 	}
 }
 
-
-// ==================== UDP Server ====================
+// ==================== UDP Server (G.711 Relay + Decoder) ====================
 
 func startUDPServer() {
 	addr, err := net.ResolveUDPAddr("udp", "0.0.0.0:"+udpPort)
@@ -373,12 +470,13 @@ func startUDPServer() {
 	if err != nil {
 		log.Fatalf("[UDP] Failed to start: %v", err)
 	}
-	log.Printf("[UDP] Audio server listening on port %s", udpPort)
+	log.Printf("[UDP] G.711 audio server listening on port %s", udpPort)
 
 	// Set larger buffer for better performance
 	conn.SetReadBuffer(1024 * 1024) // 1MB buffer
 
 	buf := make([]byte, 2048)
+
 	for {
 		n, remoteAddr, err := conn.ReadFromUDP(buf)
 		if err != nil {
@@ -386,15 +484,59 @@ func startUDPServer() {
 			continue
 		}
 
-		udpPacketCount++
-		if udpPacketCount%50 == 1 {
-			log.Printf("[UDP] Received %d bytes from %s (total: %d)", n, remoteAddr, udpPacketCount)
+		// Handle UDP keepalive ping (1-byte 0xFF)
+		if n == 1 && buf[0] == 0xFF {
+			udpPingCount++
+			if udpPingCount%10 == 1 {
+				log.Printf("[UDP] Keepalive ping #%d from %s", udpPingCount, remoteAddr)
+			}
+			continue
 		}
 
-		// Copy data and broadcast
-		data := make([]byte, n)
-		copy(data, buf[:n])
-		broadcastAudioToWeb(data)
+		// Minimum audio packet: 1 byte seq + 1 byte data
+		if n < 2 {
+			continue
+		}
+
+		// Extract sequence number (first byte)
+		seq := buf[0]
+		g711Data := buf[1:n]
+
+		// Check for sequence discontinuity (jitter/packet loss detection)
+		expectedSeq := udpLastSeq + 1
+		if udpPacketCount > 0 && seq != expectedSeq {
+			udpSeqJumps++
+			// Only log significant jumps to avoid spam
+			if udpSeqJumps%100 == 1 {
+				log.Printf("[UDP] Sequence jump detected: expected %d, got %d (total jumps: %d)",
+					expectedSeq, seq, udpSeqJumps)
+			}
+		}
+		udpLastSeq = seq
+
+		udpPacketCount++
+		if udpPacketCount%100 == 1 {
+			log.Printf("[UDP] G.711 packet #%d from %s: seq=%d, g711_bytes=%d",
+				udpPacketCount, remoteAddr, seq, len(g711Data))
+		}
+
+		// Make a copy of the raw packet for WebSocket broadcast
+		rawPacket := make([]byte, n)
+		copy(rawPacket, buf[:n])
+
+		// Broadcast raw G.711 (with seq) to WebSocket audio clients (low latency)
+		broadcastG711ToWSClients(rawPacket)
+
+		// Also decode and broadcast to HTTP streaming clients (legacy fallback)
+		audioClientsMu.RLock()
+		httpClientCount := len(audioClients)
+		audioClientsMu.RUnlock()
+
+		if httpClientCount > 0 {
+			pcmData := decodeG711ULaw(g711Data)
+			udpBytesDecoded += uint64(len(pcmData))
+			broadcastAudioToWeb(pcmData)
+		}
 	}
 }
 
@@ -517,6 +659,47 @@ func startWSPinger() {
 	}
 }
 
+// ==================== WebSocket Audio Handler (Low Latency) ====================
+
+func handleAudioWebSocket(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("[WS-AUDIO] Upgrade error: %v", err)
+		return
+	}
+
+	clientIP := r.RemoteAddr
+	log.Printf("[WS-AUDIO] Client connected: %s", clientIP)
+
+	client := &AudioWSClient{
+		conn: conn,
+	}
+
+	audioWSClientsMu.Lock()
+	audioWSClients[client] = true
+	count := len(audioWSClients)
+	audioWSClientsMu.Unlock()
+
+	log.Printf("[WS-AUDIO] Total clients: %d", count)
+
+	defer func() {
+		conn.Close()
+		audioWSClientsMu.Lock()
+		delete(audioWSClients, client)
+		count := len(audioWSClients)
+		audioWSClientsMu.Unlock()
+		log.Printf("[WS-AUDIO] Client disconnected: %s (remaining: %d)", clientIP, count)
+	}()
+
+	// Keep connection open until client disconnects
+	// Client only receives data, doesn't send anything meaningful
+	for {
+		_, _, err := conn.ReadMessage()
+		if err != nil {
+			break
+		}
+	}
+}
 
 // ==================== HTTP Handlers ====================
 
@@ -659,6 +842,10 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	wsCount := len(wsClients)
 	wsClientsMu.RUnlock()
 
+	audioClientsMu.RLock()
+	audioCount := len(audioClients)
+	audioClientsMu.RUnlock()
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"devkit": map[string]interface{}{
@@ -670,8 +857,15 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 			"ip":       getLocalIP(),
 			"httpPort": httpPort,
 			"tcpPort":  tcpPort,
+			"udpPort":  udpPort,
 		},
-		"webClients": wsCount,
+		"webClients":   wsCount,
+		"audioClients": audioCount,
+		"udpStats": map[string]interface{}{
+			"packets":      udpPacketCount,
+			"seqJumps":     udpSeqJumps,
+			"bytesDecoded": udpBytesDecoded,
+		},
 	})
 }
 
@@ -715,7 +909,8 @@ func handleAudioStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Cache-Control", "no-cache, no-store")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Audio-Format", "pcm-s16le-8000hz-mono")
+	// Updated format info: 16kHz sample rate from G.711 decoded audio
+	w.Header().Set("X-Audio-Format", "pcm-s16le-16000hz-mono")
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -724,7 +919,7 @@ func handleAudioStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create buffered channel for this client
-	ch := make(chan []byte, 100)
+	ch := make(chan []byte, 200) // Larger buffer for G.711 streams
 	audioClientsMu.Lock()
 	audioClients[ch] = true
 	audioClientsMu.Unlock()
@@ -756,7 +951,6 @@ func handleAudioStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-
 // ==================== Main ====================
 
 func main() {
@@ -765,11 +959,14 @@ func main() {
 	// Start TCP server
 	go startTCPServer()
 
-	// Start UDP server
+	// Start UDP server (with G.711 decoding)
 	go startUDPServer()
 
 	// Start WebSocket pinger
 	go startWSPinger()
+
+	// Start TCP keepalive pinger (prevents connection timeout)
+	go startTCPKeepalive()
 
 	// Setup HTTP routes
 	mux := http.NewServeMux()
@@ -800,7 +997,8 @@ func main() {
 	mux.HandleFunc("/api/token", handleToken)
 	mux.HandleFunc("/api/send", handleSend)
 	mux.HandleFunc("/health", handleHealth)
-	mux.HandleFunc("/audio-stream", handleAudioStream)
+	mux.HandleFunc("/audio-stream", handleAudioStream) // HTTP streaming (legacy)
+	mux.HandleFunc("/ws-audio", handleAudioWebSocket)  // WebSocket audio (low latency)
 
 	// Redirect /ble to /ble/index.html
 	mux.HandleFunc("/ble", func(w http.ResponseWriter, r *http.Request) {
@@ -812,11 +1010,11 @@ func main() {
 
 	fmt.Println()
 	fmt.Println(strings.Repeat("=", 60))
-	fmt.Println("  DevKit Communication Server Started (Go)")
+	fmt.Println("  DevKit Communication Server (G.711 Audio)")
 	fmt.Println(strings.Repeat("=", 60))
 	fmt.Printf("  Web UI + WS: http://%s:%s\n", localIP, httpPort)
 	fmt.Printf("  TCP Server:  %s:%s (for DevKit commands)\n", localIP, tcpPort)
-	fmt.Printf("  UDP Server:  %s:%s (for DevKit audio)\n", localIP, udpPort)
+	fmt.Printf("  UDP Server:  %s:%s (for G.711 audio)\n", localIP, udpPort)
 	fmt.Println()
 	fmt.Printf("  Auth Username: %s\n", authUsername)
 	fmt.Printf("  Auth Password: %s\n", strings.Repeat("*", len(authPassword)))

@@ -729,60 +729,133 @@
                 micStatus.style.display = 'block';
             } else {
                 micStatus.style.display = 'none';
-                stopMicStream();
+                // Use local-only stop to avoid sending "mic off" during brief disconnects
+                // The DevKit may reconnect quickly, and we don't want to interrupt its state
+                if (typeof stopMicStreamLocal === 'function') {
+                    stopMicStreamLocal();
+                }
             }
         }
 
-        // ==================== Web Audio API Mic Streaming ====================
+
+        // ==================== Web Audio API Mic Streaming (WebSocket + G.711) ====================
         let audioContext = null;
         let micStreamActive = false;
-        let micAbortController = null;
+        let audioWs = null;  // Dedicated WebSocket for audio
         let nextPlayTime = 0;
-        let audioQueue = [];
-        let streamRetryCount = 0;
         let activeSources = []; // Track active audio sources for cleanup
-        const MAX_STREAM_RETRIES = 10;
 
-        // Process audio queue continuously
-        function processAudioQueue() {
-            if (!micStreamActive || !audioContext) return;
+        // Audio configuration
+        const AUDIO_SAMPLE_RATE = 16000; // 16kHz from T5AI mic
 
-            while (audioQueue.length > 0) {
-                const floatSamples = audioQueue.shift();
+        // G.711 u-Law Lookup Table (pre-calculated for fast decoding)
+        // Maps 8-bit u-law to linear float (-1.0 to 1.0)
+        const ULAW_LOOKUP = new Float32Array(256);
+        (function initUlawTable() {
+            for (let i = 0; i < 256; i++) {
+                let uval = ~i & 0xFF; // Invert bits as per u-law standard
+                let t = ((uval & 0x0F) << 3) + 0x84;
+                t <<= ((uval & 0x70) >> 4);
+                let sign = (uval & 0x80) ? -1 : 1;
+                // Normalize 16-bit range to Float32 (-1.0 to 1.0)
+                ULAW_LOOKUP[i] = (sign * (t - 0x84)) / 32768.0;
+            }
+        })();
 
-                // Create audio buffer
-                const audioBuffer = audioContext.createBuffer(1, floatSamples.length, 8000);
-                audioBuffer.getChannelData(0).set(floatSamples);
+        // Decode G.711 u-law to Float32 samples
+        function decodeG711(g711Data) {
+            const floatBuffer = new Float32Array(g711Data.length);
+            for (let i = 0; i < g711Data.length; i++) {
+                floatBuffer[i] = ULAW_LOOKUP[g711Data[i]];
+            }
+            return floatBuffer;
+        }
 
-                // Schedule playback
-                const source = audioContext.createBufferSource();
-                source.buffer = audioBuffer;
-                source.connect(audioContext.destination);
+        // Play a single G.711 packet immediately
+        function playG711Packet(dataBuffer) {
+            if (!audioContext || audioContext.state !== 'running') return;
 
-                // Track this source for cleanup
-                activeSources.push(source);
-                source.onended = () => {
-                    const idx = activeSources.indexOf(source);
-                    if (idx > -1) activeSources.splice(idx, 1);
-                };
+            // Parse packet: [SEQ:1 byte][G711_DATA:N bytes]
+            const rawBytes = new Uint8Array(dataBuffer);
+            if (rawBytes.length < 2) return;
 
-                // If we're behind, catch up (but add small buffer to prevent gaps)
-                const now = audioContext.currentTime;
-                if (nextPlayTime < now) {
-                    nextPlayTime = now + 0.1; // 100ms buffer for smoother playback
+            // Skip sequence number (byte 0), decode G.711 data (bytes 1+)
+            const g711Data = rawBytes.subarray(1);
+            const floatSamples = decodeG711(g711Data);
+
+            // Create audio buffer at 16kHz
+            const buffer = audioContext.createBuffer(1, floatSamples.length, AUDIO_SAMPLE_RATE);
+            buffer.getChannelData(0).set(floatSamples);
+
+            // Create and schedule playback
+            const source = audioContext.createBufferSource();
+            source.buffer = buffer;
+            source.connect(audioContext.destination);
+
+            // Track for cleanup
+            activeSources.push(source);
+            source.onended = () => {
+                const idx = activeSources.indexOf(source);
+                if (idx > -1) activeSources.splice(idx, 1);
+            };
+
+            // Simple jitter handling: if we're behind, catch up
+            const now = audioContext.currentTime;
+            if (nextPlayTime < now) {
+                nextPlayTime = now + 0.02; // 20ms buffer
+            }
+
+            source.start(nextPlayTime);
+            nextPlayTime += buffer.duration;
+        }
+
+        // Connect just the audio WebSocket (used for reconnection)
+        function connectAudioWebSocket() {
+            // Close existing connection if any
+            if (audioWs) {
+                audioWs.onclose = null;
+                audioWs.close();
+            }
+
+            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${wsProtocol}//${window.location.host}/ws-audio`;
+
+            log('info', `Connecting to audio WebSocket: ${wsUrl}`);
+            audioWs = new WebSocket(wsUrl);
+            audioWs.binaryType = 'arraybuffer';
+
+            audioWs.onopen = () => {
+                log('info', '✅ Audio WebSocket connected (low-latency mode)');
+            };
+
+            audioWs.onmessage = (event) => {
+                if (micStreamActive) {
+                    playG711Packet(event.data);
                 }
+            };
 
-                source.start(nextPlayTime);
-                nextPlayTime += audioBuffer.duration;
-            }
+            audioWs.onerror = (error) => {
+                log('error', 'Audio WebSocket error');
+                console.error('Audio WS error:', error);
+            };
 
-            // Keep processing
-            if (micStreamActive) {
-                requestAnimationFrame(processAudioQueue);
-            }
+            audioWs.onclose = () => {
+                log('info', 'Audio WebSocket closed');
+                audioWs = null;
+                if (micStreamActive) {
+                    // Try to reconnect
+                    setTimeout(() => {
+                        if (micStreamActive) {
+                            log('info', 'Attempting to reconnect audio WebSocket...');
+                            connectAudioWebSocket();
+                        }
+                    }, 1000);
+                }
+            };
         }
 
         async function startMicStream() {
+
             // Prevent multiple starts
             if (micStreamActive) {
                 log('warn', 'Mic stream already active');
@@ -790,20 +863,18 @@
             }
 
             try {
-                // Create AudioContext on user interaction
+                // Create AudioContext with low-latency hint
                 if (!audioContext) {
-                    audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 8000 });
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                        latencyHint: 'interactive',
+                        sampleRate: AUDIO_SAMPLE_RATE
+                    });
+                    log('info', `AudioContext created (latencyHint: interactive, sampleRate: ${audioContext.sampleRate}Hz)`);
                 }
 
                 // Resume if suspended
                 if (audioContext.state === 'suspended') {
                     await audioContext.resume();
-                }
-
-                // Abort any existing stream first
-                if (micAbortController) {
-                    micAbortController.abort();
-                    await new Promise(r => setTimeout(r, 100)); // Wait for cleanup
                 }
 
                 // FIRST: Send "mic on" command to DevKit to start UDP streaming
@@ -820,98 +891,21 @@
                 }
 
                 micStreamActive = true;
-                micAbortController = new AbortController();
-                nextPlayTime = audioContext.currentTime + 0.15; // Start with 150ms buffer
-                audioQueue = [];
-                streamRetryCount = 0;
+                nextPlayTime = audioContext.currentTime + 0.05; // Start with 50ms buffer
 
                 document.getElementById('btn-mic-start').disabled = true;
                 document.getElementById('btn-mic-stop').disabled = false;
-                document.getElementById('mic-stream-status').textContent = '🔴 Streaming...';
+                document.getElementById('mic-stream-status').textContent = '🔴 WebSocket G.711 (Low Latency)';
                 document.getElementById('mic-stream-status').style.color = 'var(--accent-green)';
 
-                log('info', 'Starting mic stream...');
+                // Connect to WebSocket audio endpoint
+                connectAudioWebSocket();
 
-                // Start audio queue processor
-                requestAnimationFrame(processAudioQueue);
 
-                // Fetch the audio stream with retry logic
-                while (micStreamActive && streamRetryCount < MAX_STREAM_RETRIES) {
-                    try {
-                        const response = await fetch('/audio-stream', {
-                            signal: micAbortController.signal,
-                            cache: 'no-store'
-                        });
 
-                        if (!response.ok) {
-                            throw new Error(`HTTP ${response.status}`);
-                        }
-
-                        const reader = response.body.getReader();
-                        streamRetryCount = 0; // Reset on successful connection
-
-                        // Buffer for accumulating PCM data
-                        let pcmBuffer = new Uint8Array(0);
-                        const CHUNK_SIZE = 320; // 20ms of audio at 8kHz 16-bit mono
-
-                        while (micStreamActive) {
-                            const { done, value } = await reader.read();
-                            if (done) {
-                                log('info', 'Audio stream ended, reconnecting...');
-                                break;
-                            }
-
-                            // Append new data to buffer
-                            const newBuffer = new Uint8Array(pcmBuffer.length + value.length);
-                            newBuffer.set(pcmBuffer);
-                            newBuffer.set(value, pcmBuffer.length);
-                            pcmBuffer = newBuffer;
-
-                            // Process complete chunks
-                            while (pcmBuffer.length >= CHUNK_SIZE) {
-                                const chunk = pcmBuffer.slice(0, CHUNK_SIZE);
-                                pcmBuffer = pcmBuffer.slice(CHUNK_SIZE);
-
-                                // Convert PCM 16-bit to Float32
-                                const samples = new Int16Array(chunk.buffer, chunk.byteOffset, chunk.length / 2);
-                                const floatSamples = new Float32Array(samples.length);
-                                for (let i = 0; i < samples.length; i++) {
-                                    floatSamples[i] = samples[i] / 32768.0;
-                                }
-
-                                // Add to queue (limit queue size to prevent memory issues)
-                                if (audioQueue.length < 100) {
-                                    audioQueue.push(floatSamples);
-                                } else {
-                                    // Drop oldest to prevent lag buildup
-                                    audioQueue.shift();
-                                    audioQueue.push(floatSamples);
-                                }
-                            }
-                        }
-                    } catch (err) {
-                        if (err.name === 'AbortError') {
-                            log('info', 'Audio stream aborted');
-                            break;
-                        }
-                        streamRetryCount++;
-                        log('warn', `Stream error (retry ${streamRetryCount}/${MAX_STREAM_RETRIES}): ${err.message}`);
-                        if (micStreamActive && streamRetryCount < MAX_STREAM_RETRIES) {
-                            await new Promise(r => setTimeout(r, 500 * streamRetryCount)); // Exponential backoff
-                        }
-                    }
-                }
-
-                if (streamRetryCount >= MAX_STREAM_RETRIES) {
-                    log('error', 'Max retries reached, stopping stream');
-                }
             } catch (err) {
-                if (err.name !== 'AbortError') {
-                    log('error', 'Mic stream error: ' + err.message);
-                }
-            } finally {
+                log('error', 'Mic stream error: ' + err.message);
                 micStreamActive = false;
-                audioQueue = [];
                 document.getElementById('btn-mic-start').disabled = false;
                 document.getElementById('btn-mic-stop').disabled = true;
                 document.getElementById('mic-stream-status').textContent = '(click Start to listen)';
@@ -919,23 +913,17 @@
             }
         }
 
-        function stopMicStream() {
-            log('info', 'Stopping mic stream...');
+
+        // Stop mic stream locally (audio playback only, no command to DevKit)
+        // Use this when DevKit disconnects to avoid sending commands during reconnect
+        function stopMicStreamLocal() {
             micStreamActive = false;
 
-            // Send "mic off" command to DevKit to stop UDP streaming
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                log('info', 'Sending "mic off" command to DevKit...');
-                ws.send(JSON.stringify({
-                    type: 'send_to_devkit',
-                    data: 'mic off'
-                }));
-            }
-
-            // Abort the fetch request
-            if (micAbortController) {
-                micAbortController.abort();
-                micAbortController = null;
+            // Close audio WebSocket
+            if (audioWs) {
+                audioWs.onclose = null; // Prevent reconnect attempt
+                audioWs.close();
+                audioWs = null;
             }
 
             // Stop all active audio sources immediately
@@ -949,19 +937,39 @@
             }
             activeSources = [];
 
-            // Clear the audio queue
-            audioQueue = [];
-
             // Suspend AudioContext to immediately stop any remaining audio
             if (audioContext && audioContext.state === 'running') {
-                audioContext.suspend().then(() => {
-                    log('info', 'Audio context suspended');
-                }).catch(() => { });
+                audioContext.suspend().catch(() => { });
             }
 
             // Reset play time
             nextPlayTime = 0;
+
+            // Update UI
+            document.getElementById('btn-mic-start').disabled = false;
+            document.getElementById('btn-mic-stop').disabled = true;
+            document.getElementById('mic-stream-status').textContent = '(click Start to listen)';
+            document.getElementById('mic-stream-status').style.color = 'var(--text-secondary)';
         }
+
+
+        // Stop mic stream and send command to DevKit (user-initiated stop)
+        function stopMicStream() {
+            log('info', 'Stopping mic stream...');
+
+            // Send "mic off" command to DevKit to stop UDP streaming
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                log('info', 'Sending "mic off" command to DevKit...');
+                ws.send(JSON.stringify({
+                    type: 'send_to_devkit',
+                    data: 'mic off'
+                }));
+            }
+
+            // Stop local playback
+            stopMicStreamLocal();
+        }
+
 
         function log(type, message) {
             const console = document.getElementById('console');
