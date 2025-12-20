@@ -48,6 +48,13 @@
 /* TCP client for web app communication */
 #include "tcp_client.h"
 
+/* BLE includes for standalone mode (SKIP_TUYA_CLOUD) */
+#ifdef ENABLE_BLUETOOTH
+#include "ble_mgr.h"
+#include "ble_netcfg.h"
+#include "netcfg.h"
+#endif
+
 /* BLE configuration for Web Bluetooth */
 #include "ble_config.h"
 
@@ -112,13 +119,8 @@ static void tcp_message_callback(const char *data, uint32_t len)
     /* Handle server responses (not commands) */
     if (strncmp(data, "auth:ok", 7) == 0) {
         PR_INFO("Server authenticated us successfully");
-        /* Auto-start mic streaming on connection via UDP */
-        if (!mic_streaming_is_active()) {
-            /* Use same host as TCP, but UDP port 5001 */
-            extern char g_tcp_host[64];
-            mic_streaming_start(g_tcp_host, 5001);
-            PR_INFO("Auto-started mic streaming via UDP");
-        }
+        /* NOTE: Mic streaming is now controlled manually via 'mic on' / 'mic off' commands
+         * from the web UI. User clicks Start button to begin streaming. */
         return;  /* Don't process as a command */
     }
     
@@ -623,6 +625,7 @@ void user_main(void)
 
     reset_netconfig_start();
 
+#if !SKIP_TUYA_CLOUD
     if (OPRT_OK != tuya_authorize_read(&license)) {
         license.uuid = TUYA_OPENSDK_UUID;
         license.authkey = TUYA_OPENSDK_AUTHKEY;
@@ -640,6 +643,37 @@ void user_main(void)
                                     .network_check = user_network_check,
                                 });
     assert(rt == OPRT_OK);
+#else
+    PR_NOTICE("============================================");
+    PR_NOTICE("     TUYA CLOUD DISABLED (SKIP_TUYA_CLOUD=1)");
+    PR_NOTICE("============================================");
+    PR_NOTICE("Web app communication only mode enabled.");
+    PR_NOTICE("No Tuya Smart Life app integration.");
+    PR_NOTICE("Real-time UDP audio streaming optimized.");
+    PR_NOTICE("============================================");
+    
+    /* Still initialize Tuya IoT client for BLE to work, but skip cloud connection.
+     * BLE stack requires the IoT client structure for encryption keys and advertising. */
+    if (OPRT_OK != tuya_authorize_read(&license)) {
+        license.uuid = TUYA_OPENSDK_UUID;
+        license.authkey = TUYA_OPENSDK_AUTHKEY;
+        PR_DEBUG("Using configured UUID/AuthKey for BLE");
+    }
+    
+    rt = tuya_iot_init(&client, &(const tuya_iot_config_t){
+                                    .software_ver = PROJECT_VERSION,
+                                    .productkey = TUYA_PRODUCT_ID,
+                                    .uuid = license.uuid,
+                                    .authkey = license.authkey,
+                                    .event_handler = user_event_handler_on,
+                                    .network_check = user_network_check,
+                                });
+    if (rt != OPRT_OK) {
+        PR_ERR("tuya_iot_init failed: %d (BLE may not work)", rt);
+    } else {
+        PR_NOTICE("IoT client initialized for BLE (cloud connection skipped)");
+    }
+#endif
 
 #if defined(ENABLE_LIBLWIP) && (ENABLE_LIBLWIP == 1)
     TUYA_LwIP_Init();
@@ -662,6 +696,7 @@ void user_main(void)
     netmgr_conn_set(NETCONN_WIFI, NETCONN_CMD_NETCFG, &(netcfg_args_t){.type = NETCFG_TUYA_BLE | NETCFG_TUYA_WIFI_AP});
 #endif
 
+#if !SKIP_TUYA_CLOUD
     PR_DEBUG("tuya_iot_init success");
     
     /* Print Device Binding Information at startup */
@@ -689,6 +724,10 @@ void user_main(void)
     tuya_iot_start(&client);
 
     reset_netconfig_check();
+#else
+    /* Skip Tuya IoT start when cloud is disabled */
+    PR_NOTICE("Skipping tuya_iot_start (cloud disabled)");
+#endif
 
     /* Initialize BLE configuration handler */
     ble_config_init();
@@ -746,8 +785,14 @@ void user_main(void)
 #endif
 
     for (;;) {
+#if !SKIP_TUYA_CLOUD
         /* Loop to receive packets, and handles client keepalive */
         tuya_iot_yield(&client);
+#else
+        /* When cloud is disabled, just sleep to keep the main thread alive */
+        /* All work is done in background threads (TCP client, mic streaming) */
+        tal_system_sleep(100);
+#endif
     }
 }
 

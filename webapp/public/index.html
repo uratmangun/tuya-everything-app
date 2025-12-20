@@ -806,6 +806,19 @@
                     await new Promise(r => setTimeout(r, 100)); // Wait for cleanup
                 }
 
+                // FIRST: Send "mic on" command to DevKit to start UDP streaming
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    log('info', 'Sending "mic on" command to DevKit...');
+                    ws.send(JSON.stringify({
+                        type: 'send_to_devkit',
+                        data: 'mic on'
+                    }));
+                    // Wait a bit for DevKit to start streaming
+                    await new Promise(r => setTimeout(r, 200));
+                } else {
+                    log('warn', 'WebSocket not connected, mic stream may not receive data');
+                }
+
                 micStreamActive = true;
                 micAbortController = new AbortController();
                 nextPlayTime = audioContext.currentTime + 0.15; // Start with 150ms buffer
@@ -909,6 +922,15 @@
         function stopMicStream() {
             log('info', 'Stopping mic stream...');
             micStreamActive = false;
+
+            // Send "mic off" command to DevKit to stop UDP streaming
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                log('info', 'Sending "mic off" command to DevKit...');
+                ws.send(JSON.stringify({
+                    type: 'send_to_devkit',
+                    data: 'mic off'
+                }));
+            }
 
             // Abort the fetch request
             if (micAbortController) {

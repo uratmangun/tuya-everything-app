@@ -94,6 +94,23 @@
 #define RTSP_TUNNEL_ENABLED  0
 #endif
 
+/**
+ * @brief Skip Tuya Cloud Services
+ * 
+ * When set to 1, disables Tuya Cloud IoT features (Smart Life app, cloud DP sync).
+ * This eliminates constant TLS connections that can block real-time UDP audio streaming.
+ * 
+ * Use this mode when:
+ * - Only web app communication is needed (via TCP/UDP)
+ * - Real-time audio/video streaming is critical
+ * - You don't need Tuya Smart Life app integration
+ * 
+ * Set via environment variable: SKIP_TUYA_CLOUD="1"
+ */
+#ifndef SKIP_TUYA_CLOUD
+#define SKIP_TUYA_CLOUD      0
+#endif
+
 // clang-format on
 
 #endif

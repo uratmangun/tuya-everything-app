@@ -18,20 +18,21 @@
 /***********************************************************
 ************************macro define************************
 ***********************************************************/
-/* Audio configuration - matching the devkit's onboard mic */
-#define MIC_SAMPLE_RATE     8000
+/* Audio configuration - actual mic runs at ~62KB/s
+ * Likely 16kHz 16-bit stereo, but we just stream raw PCM */
+#define MIC_SAMPLE_RATE     16000
 #define MIC_BITS            16
 #define MIC_CHANNELS        1
-#define MIC_FRAME_MS        20
-#define MIC_FRAME_SIZE      (MIC_SAMPLE_RATE * MIC_BITS / 8 * MIC_CHANNELS * MIC_FRAME_MS / 1000)  /* 320 bytes per 20ms frame */
+#define MIC_FRAME_MS        10       /* 10ms frames for lower latency */
+#define MIC_FRAME_SIZE      320      /* Send in 320-byte chunks */
 
-/* Ring buffer for audio data - 500ms buffer */
-#define MIC_RINGBUF_SIZE    (MIC_FRAME_SIZE * 25)  /* 8000 bytes = 500ms of audio */
+/* Ring buffer for audio data - 2 seconds buffer (handles 62KB/s input) */
+#define MIC_RINGBUF_SIZE    (64000 * 2)  /* 128KB = ~2 seconds at 62KB/s */
 
 /* Streaming task configuration */
 #define MIC_STREAM_TASK_STACK   4096
 #define MIC_STREAM_TASK_PRIO    THREAD_PRIO_2
-#define MIC_STREAM_INTERVAL_MS  20  /* Send every 20ms for lower latency */
+#define MIC_STREAM_INTERVAL_MS  5   /* Send every 5ms for lower latency */
 
 /* UDP port for audio streaming */
 #define UDP_AUDIO_PORT      5001
@@ -70,15 +71,20 @@ static void mic_audio_frame_callback(TDL_AUDIO_FRAME_FORMAT_E type,
                                       uint8_t *data, uint32_t len)
 {
     static uint32_t callback_count = 0;
+    static uint32_t dropped_frames = 0;
     callback_count++;
     
     /* Log every 100 callbacks to confirm mic is working */
     if (callback_count % 100 == 1) {
-        PR_DEBUG("Mic callback #%u: streaming=%d, type=%d, len=%u", 
-                 callback_count, g_mic_ctx.streaming, type, len);
+        PR_DEBUG("Mic callback #%u: streaming=%d, type=%d, len=%u, dropped=%u", 
+                 callback_count, g_mic_ctx.streaming, type, len, dropped_frames);
     }
     
     if (!g_mic_ctx.streaming || !g_mic_ctx.ringbuf) {
+        /* Track when not streaming */
+        if (g_mic_ctx.streaming && !g_mic_ctx.ringbuf) {
+            PR_ERR("Ringbuf is NULL but streaming is true!");
+        }
         return;
     }
     
@@ -87,8 +93,17 @@ static void mic_audio_frame_callback(TDL_AUDIO_FRAME_FORMAT_E type,
         return;
     }
     
-    /* Write to ring buffer (will drop oldest data if full) */
-    tuya_ring_buff_write(g_mic_ctx.ringbuf, data, len);
+    
+    /* Write to ring buffer (will drop oldest data if full with stop type) */
+    uint32_t written = tuya_ring_buff_write(g_mic_ctx.ringbuf, data, len);
+    if (written < len) {
+        dropped_frames++;
+        if (dropped_frames % 50 == 1) {
+            uint32_t used = tuya_ring_buff_used_size_get(g_mic_ctx.ringbuf);
+            PR_WARN("Ring buffer full! Dropped %u bytes (total drops: %u, used: %u)", 
+                    len - written, dropped_frames, used);
+        }
+    }
 }
 
 /**
@@ -99,44 +114,82 @@ static void mic_streaming_task(void *arg)
     uint8_t send_buf[MIC_FRAME_SIZE * 2];
     uint32_t data_len;
     uint32_t send_count = 0;
+    uint32_t loop_count = 0;
+    uint32_t empty_count = 0;
+    uint32_t last_heartbeat = 0;
     
     PR_INFO("Mic streaming task started (UDP)");
     
     while (g_mic_ctx.streaming) {
+        loop_count++;
+        
+        /* Heartbeat every 5 seconds to show thread is alive */
+        if ((loop_count - last_heartbeat) >= 1000) {  /* 1000 * 5ms = 5 seconds */
+            PR_INFO("Mic stream heartbeat: loops=%u, sends=%u, empty=%u, streaming=%d", 
+                     loop_count, send_count, empty_count, g_mic_ctx.streaming);
+            last_heartbeat = loop_count;
+        }
+        
+        /* Check if ring buffer is valid */
+        if (!g_mic_ctx.ringbuf) {
+            PR_ERR("Ring buffer is NULL! Exiting streaming task.");
+            break;
+        }
+        
         /* Check how much data is available */
         data_len = tuya_ring_buff_used_size_get(g_mic_ctx.ringbuf);
         
         /* Log buffer status periodically */
-        if (send_count % 100 == 0) {
+        if (send_count % 200 == 0 && send_count > 0) {
             PR_DEBUG("Mic stream: ringbuf=%u bytes, udp_ready=%d", 
                      data_len, udp_audio_is_ready());
         }
         
-        if (data_len >= MIC_FRAME_SIZE) {
-            /* Send 1 frame at a time for lower latency */
-            if (data_len > MIC_FRAME_SIZE) {
-                data_len = MIC_FRAME_SIZE;
-            }
+        /* Send as much data as available, up to 2KB per iteration to keep up with input rate */
+        uint32_t bytes_this_iteration = 0;
+        while (data_len >= MIC_FRAME_SIZE && bytes_this_iteration < 2048 && udp_audio_is_ready()) {
+            empty_count = 0;  /* Reset empty counter */
+            
+            /* Send 1 frame at a time */
+            uint32_t to_send = (data_len > MIC_FRAME_SIZE) ? MIC_FRAME_SIZE : data_len;
             
             /* Read audio data from ring buffer */
             uint32_t read_len = tuya_ring_buff_read(g_mic_ctx.ringbuf, 
                                                      send_buf, 
-                                                     data_len);
+                                                     to_send);
             
-            if (read_len > 0 && udp_audio_is_ready()) {
+            if (read_len > 0) {
                 /* Send via UDP - no prefix needed, raw PCM */
                 OPERATE_RET rt = udp_audio_send(send_buf, read_len);
                 if (rt == OPRT_OK) {
                     g_mic_ctx.total_bytes_sent += read_len;
                     g_mic_ctx.total_frames_sent++;
                     send_count++;
+                    bytes_this_iteration += read_len;
                     
-                    /* Log every 50 sends (~1 second) */
-                    if (send_count % 50 == 0) {
+                    /* Log every 200 sends (~1 second at 200Hz) */
+                    if (send_count % 200 == 0) {
                         PR_INFO("Mic UDP sent: %u frames, %u bytes total", 
                                 g_mic_ctx.total_frames_sent, g_mic_ctx.total_bytes_sent);
                     }
+                } else {
+                    PR_WARN("UDP send failed: %d (read_len=%u)", rt, read_len);
+                    break;  /* Stop trying if UDP fails */
                 }
+            } else {
+                PR_WARN("Ring buffer read returned 0 despite %u bytes available", data_len);
+                break;
+            }
+            
+            /* Update data_len for next iteration */
+            data_len = tuya_ring_buff_used_size_get(g_mic_ctx.ringbuf);
+        }
+        
+        if (bytes_this_iteration == 0) {
+            empty_count++;
+            /* Warn if buffer has been empty for too long (5 seconds at 5ms intervals) */
+            if (empty_count == 1000) {  /* 1000 * 5ms = 5 seconds */
+                PR_WARN("No mic data for 5 seconds! Mic callback may not be running.");
             }
         }
         
@@ -144,7 +197,8 @@ static void mic_streaming_task(void *arg)
         tal_system_sleep(MIC_STREAM_INTERVAL_MS);
     }
     
-    PR_INFO("Mic streaming task stopped");
+    PR_NOTICE("Mic streaming task EXITING! streaming=%d, loop_count=%u", 
+              g_mic_ctx.streaming, loop_count);
 }
 
 OPERATE_RET mic_streaming_init(void)
@@ -165,8 +219,9 @@ OPERATE_RET mic_streaming_init(void)
         return rt;
     }
     
-    /* Create ring buffer for audio data */
-    rt = tuya_ring_buff_create(MIC_RINGBUF_SIZE, OVERFLOW_PSRAM_STOP_TYPE, &g_mic_ctx.ringbuf);
+    /* Create ring buffer for audio data - use COVERAGE type so old data is overwritten
+     * instead of blocking writes. This prevents backpressure affecting the audio driver. */
+    rt = tuya_ring_buff_create(MIC_RINGBUF_SIZE, OVERFLOW_PSRAM_COVERAGE_TYPE, &g_mic_ctx.ringbuf);
     if (rt != OPRT_OK) {
         PR_ERR("Failed to create audio ring buffer: %d", rt);
         return rt;

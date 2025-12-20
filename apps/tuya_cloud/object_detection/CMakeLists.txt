@@ -81,6 +81,11 @@ if(RTSP_TUNNEL_ENABLED)
     target_compile_definitions(${EXAMPLE_LIB} PRIVATE RTSP_TUNNEL_ENABLED=${RTSP_TUNNEL_ENABLED})
 endif()
 
+# Skip Tuya Cloud services (web app only mode)
+if(SKIP_TUYA_CLOUD)
+    target_compile_definitions(${EXAMPLE_LIB} PRIVATE SKIP_TUYA_CLOUD=${SKIP_TUYA_CLOUD})
+endif()
+
 ########################################
 # Add subdirectory
 ########################################

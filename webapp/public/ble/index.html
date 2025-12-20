@@ -1442,23 +1442,12 @@
             // If we have Tuya crypto, use transparent data channel
             if (tuyaCrypto) {
                 try {
-                    // Determine channel type based on command
-                    // Channel 1 = BLE_CHANNLE_NETCFG (for WiFi config)
-                    // Channel 0 = Custom config channel (for TCP settings, status, etc.)
-                    let channelType = 0;  // Default to custom channel
-                    let cmdToSend = cmd;
+                    // All commands go to channel 0 = BLE_CHANNEL_CONFIG
+                    // This is where our custom ble_config_channel_handler is registered
+                    // It handles: set_wifi, set_tcp, get_status, tcp_connect, tcp_disconnect, wifi_scan, wifi_disconnect, reboot
+                    const channelType = 0;  // BLE_CHANNEL_CONFIG
 
-                    if (cmd.cmd === 'set_wifi' && cmd.ssid) {
-                        // Use NETCFG channel for WiFi - format: {ssid, pwd, token}
-                        channelType = 1;  // BLE_CHANNLE_NETCFG
-                        cmdToSend = {
-                            ssid: cmd.ssid,
-                            pwd: cmd.password || '',
-                            token: 'webble'  // Required by netcfg handler
-                        };
-                    }
-
-                    const packet = tuyaCrypto.createTransparentDataCmd(channelType, cmdToSend);
+                    const packet = tuyaCrypto.createTransparentDataCmd(channelType, cmd);
                     // Use mode 0 (unencrypted) since we haven't completed handshake yet
                     const withMode = await tuyaCrypto.encryptPacket(packet, 0);
                     const framed = tuyaCrypto.encodeForTransmission(withMode);
