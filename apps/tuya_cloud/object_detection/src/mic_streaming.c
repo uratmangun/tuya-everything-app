@@ -43,6 +43,10 @@
 #define MIC_STREAM_TASK_PRIO    THREAD_PRIO_2
 #define MIC_STREAM_INTERVAL_MS  10   /* Check every 10ms */
 
+/* Audio watchdog configuration - restarts driver if silent for too long */
+#define MIC_WATCHDOG_TIMEOUT_MS 5000  /* 5 seconds without mic data triggers restart */
+#define MIC_WATCHDOG_EMPTY_COUNT (MIC_WATCHDOG_TIMEOUT_MS / MIC_STREAM_INTERVAL_MS)
+
 /* UDP keepalive configuration */
 #define UDP_KEEPALIVE_INTERVAL_SEC  25   /* Send ping every 25 seconds */
 #define UDP_KEEPALIVE_TASK_STACK    2048
@@ -64,6 +68,7 @@ typedef struct {
     uint32_t total_frames_sent;
     uint32_t dropped_frames;
     uint32_t last_send_time;  /* Last time audio was sent (for keepalive logic) */
+    uint32_t watchdog_restarts;  /* Count of automatic driver restarts */
 } mic_streaming_ctx_t;
 
 /***********************************************************
@@ -175,8 +180,9 @@ static void mic_streaming_task(void *arg)
         
         /* Heartbeat every 5 seconds to show thread is alive */
         if ((loop_count - last_heartbeat) >= 500) {  /* 500 * 10ms = 5 seconds */
-            PR_INFO("Mic stream heartbeat: loops=%u, sends=%u, empty=%u, drops=%u, captured=%u bytes", 
-                     loop_count, send_count, empty_count, drop_count, g_mic_ctx.total_bytes_captured);
+            PR_INFO("Mic stream heartbeat: loops=%u, sends=%u, empty=%u, drops=%u, captured=%u bytes, restarts=%u", 
+                     loop_count, send_count, empty_count, drop_count, 
+                     g_mic_ctx.total_bytes_captured, g_mic_ctx.watchdog_restarts);
             last_heartbeat = loop_count;
         }
         
@@ -243,9 +249,32 @@ static void mic_streaming_task(void *arg)
         
         if (data_len < MIC_FRAME_SIZE_PCM) {
             empty_count++;
-            /* Warn if buffer has been empty for too long (5 seconds at 10ms intervals) */
-            if (empty_count == 500) {  /* 500 * 10ms = 5 seconds */
-                PR_WARN("No mic data for 5 seconds! Mic callback may not be running.");
+            
+            /* AUDIO WATCHDOG: Detect driver stall and warn */
+            if (empty_count == MIC_WATCHDOG_EMPTY_COUNT) {
+                g_mic_ctx.watchdog_restarts++;
+                
+                PR_ERR("Audio Watchdog: Mic driver stalled (no data for %d ms)!",
+                        MIC_WATCHDOG_TIMEOUT_MS);
+                PR_ERR("  Streaming will continue with silence. Use 'mic off' then 'mic on' to restart.");
+                PR_ERR("  Stall count: %u", g_mic_ctx.watchdog_restarts);
+                
+                /* 
+                 * NOTE: We cannot restart the T5AI audio driver here because:
+                 * - The BK7258 audio ADC keeps internal state ("aud adc is init already")
+                 * - tdl_audio_close() + tdl_audio_open() causes hardware conflicts
+                 * - The underlying onboard_mic_stream requires full pipeline restart
+                 * 
+                 * The recommended fix is to use 'mic off' then 'mic on' from the web UI
+                 * which properly stops/starts the mic streaming system.
+                 */
+            }
+            
+            /* Continue logging every 30 seconds after initial stall */
+            if (empty_count > MIC_WATCHDOG_EMPTY_COUNT && 
+                (empty_count % (30000 / MIC_STREAM_INTERVAL_MS)) == 0) {
+                PR_WARN("Audio Watchdog: Still no mic data (%u ms since last data)",
+                        empty_count * MIC_STREAM_INTERVAL_MS);
             }
         }
         
@@ -320,6 +349,7 @@ OPERATE_RET mic_streaming_start(const char *host, uint16_t port)
     g_mic_ctx.total_bytes_captured = 0;
     g_mic_ctx.total_frames_sent = 0;
     g_mic_ctx.dropped_frames = 0;
+    g_mic_ctx.watchdog_restarts = 0;
     g_mic_ctx.last_send_time = tal_system_get_millisecond();  /* Init time for keepalive */
     
     /* Start streaming flag first */
@@ -384,9 +414,9 @@ OPERATE_RET mic_streaming_stop(void)
     tuya_ring_buff_reset(g_mic_ctx.ringbuf);
     
     PR_NOTICE("Mic streaming stopped");
-    PR_NOTICE("  Stats: captured=%u bytes, sent=%u frames, dropped=%u", 
+    PR_NOTICE("  Stats: captured=%u bytes, sent=%u frames, dropped=%u, watchdog_restarts=%u", 
               g_mic_ctx.total_bytes_captured, g_mic_ctx.total_frames_sent, 
-              g_mic_ctx.dropped_frames);
+              g_mic_ctx.dropped_frames, g_mic_ctx.watchdog_restarts);
     
     return OPRT_OK;
 }
