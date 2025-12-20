@@ -229,6 +229,8 @@ const tcpServer = net.createServer((socket) => {
             if (rawMessage.length > 6 && rawMessage.slice(0, 6).equals(audioPrefix)) {
                 // Extract audio payload (after the 'audio:' prefix)
                 const audioData = rawMessage.slice(6);
+                
+                console.log(`[TCP] Audio data received: ${audioData.length} bytes`);
 
                 // Forward audio data to web clients as binary
                 broadcastAudioToWeb(audioData);

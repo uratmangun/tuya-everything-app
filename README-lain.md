@@ -11,3 +11,7 @@ cd /home/uratmangun/CascadeProjects/TuyaOpen/apps/tuya_cloud/object_detection &&
 build 
 
 cd /home/uratmangun/CascadeProjects/TuyaOpen/apps/tuya_cloud/object_detection && ../../../tos.py build
+
+check serial 
+
+ls -la /dev/ttyACM*

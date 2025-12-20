@@ -542,6 +542,16 @@ void user_main(void)
     } else {
         PR_INFO("Audio player initialized successfully");
         
+        /* Initialize microphone streaming FIRST (creates ring buffer) */
+        /* This must be done BEFORE tdl_audio_open so callback has valid buffer */
+        PR_INFO("Initializing microphone streaming...");
+        rt = mic_streaming_init();
+        if (rt != OPRT_OK) {
+            PR_WARN("Failed to initialize mic streaming: %d", rt);
+        } else {
+            PR_INFO("Microphone streaming initialized (standby mode)");
+        }
+        
         /* Open the audio device to enable playback */
         /* We pass the mic streaming callback so it can capture mic data when streaming is enabled */
         TDL_AUDIO_HANDLE_T audio_hdl = NULL;
@@ -593,14 +603,7 @@ void user_main(void)
         }
     }
 
-    /* Initialize microphone streaming (for web app audio) */
-    PR_INFO("Initializing microphone streaming...");
-    rt = mic_streaming_init();
-    if (rt != OPRT_OK) {
-        PR_ERR("Failed to initialize mic streaming: %d", rt);
-    } else {
-        PR_INFO("Microphone streaming initialized (standby mode)");
-    }
+    /* Note: mic_streaming_init() was called earlier, before tdl_audio_open() */
 
 #if !defined(PLATFORM_UBUNTU) || (PLATFORM_UBUNTU == 0)
     tal_cli_init();
