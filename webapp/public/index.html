@@ -740,6 +740,7 @@
         let nextPlayTime = 0;
         let audioQueue = [];
         let streamRetryCount = 0;
+        let activeSources = []; // Track active audio sources for cleanup
         const MAX_STREAM_RETRIES = 10;
 
         // Process audio queue continuously
@@ -757,6 +758,13 @@
                 const source = audioContext.createBufferSource();
                 source.buffer = audioBuffer;
                 source.connect(audioContext.destination);
+
+                // Track this source for cleanup
+                activeSources.push(source);
+                source.onended = () => {
+                    const idx = activeSources.indexOf(source);
+                    if (idx > -1) activeSources.splice(idx, 1);
+                };
 
                 // If we're behind, catch up (but add small buffer to prevent gaps)
                 const now = audioContext.currentTime;
@@ -901,11 +909,36 @@
         function stopMicStream() {
             log('info', 'Stopping mic stream...');
             micStreamActive = false;
+
+            // Abort the fetch request
             if (micAbortController) {
                 micAbortController.abort();
                 micAbortController = null;
             }
+
+            // Stop all active audio sources immediately
+            for (const source of activeSources) {
+                try {
+                    source.stop();
+                    source.disconnect();
+                } catch (e) {
+                    // Source may have already ended
+                }
+            }
+            activeSources = [];
+
+            // Clear the audio queue
             audioQueue = [];
+
+            // Suspend AudioContext to immediately stop any remaining audio
+            if (audioContext && audioContext.state === 'running') {
+                audioContext.suspend().then(() => {
+                    log('info', 'Audio context suspended');
+                }).catch(() => { });
+            }
+
+            // Reset play time
+            nextPlayTime = 0;
         }
 
         function log(type, message) {
