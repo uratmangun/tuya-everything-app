@@ -1,14 +1,13 @@
-# Dependencies
-node_modules/
+# Go binary
+server
+*.exe
 
 # Environment files with secrets
 .env
-.env.production
 .env.local
 
 # Logs
 *.log
-npm-debug.log*
 
 # Build output
 dist/
@@ -17,3 +16,9 @@ dist/
 # OS files
 .DS_Store
 Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

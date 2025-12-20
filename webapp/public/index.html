@@ -500,11 +500,13 @@
                     style="margin-top: 1rem; padding: 0.75rem; background: rgba(0,0,0,0.3); border-radius: 8px; display: none;">
                     <div style="margin-bottom: 0.5rem; font-size: 0.85rem;">
                         <span style="color: var(--accent-green);">🎤 Live Microphone Stream</span>
-                        <span id="mic-stream-status" style="color: var(--text-secondary); margin-left: 0.5rem;">(click Start to listen)</span>
+                        <span id="mic-stream-status" style="color: var(--text-secondary); margin-left: 0.5rem;">(click
+                            Start to listen)</span>
                     </div>
                     <div class="btn-group">
                         <button id="btn-mic-start" class="btn btn-primary" onclick="startMicStream()">▶ Start</button>
-                        <button id="btn-mic-stop" class="btn btn-secondary" onclick="stopMicStream()" disabled>⏹ Stop</button>
+                        <button id="btn-mic-stop" class="btn btn-secondary" onclick="stopMicStream()" disabled>⏹
+                            Stop</button>
                     </div>
                 </div>
             </div>
@@ -590,7 +592,7 @@
             ws.onmessage = (event) => {
                 // Handle text/JSON data only (audio now via HTTP stream)
                 if (event.data instanceof Blob) return;
-                
+
                 try {
                     const data = JSON.parse(event.data);
                     handleMessage(data);
@@ -602,14 +604,15 @@
             ws.onclose = () => {
                 log('info', 'WebSocket disconnected');
                 updateWsStatus(false);
-                updateDevKitStatus(false);
+                // Don't update DevKit status or stop mic stream on WS disconnect
+                // The audio stream is independent of WebSocket
 
-                // Auto-reconnect after 3 seconds
+                // Auto-reconnect after 2 seconds
                 setTimeout(() => {
                     if (!ws || ws.readyState === WebSocket.CLOSED) {
                         connect();
                     }
-                }, 3000);
+                }, 2000);
             };
 
             ws.onerror = (err) => {
@@ -720,7 +723,7 @@
             dot.className = 'status-dot ' + (connected ? 'connected' : 'disconnected');
             status.textContent = connected ? 'Connected' : 'Disconnected';
             ipEl.textContent = address || '--';
-            
+
             // Show/hide mic controls based on connection
             if (connected) {
                 micStatus.style.display = 'block';
@@ -736,34 +739,35 @@
         let micAbortController = null;
         let nextPlayTime = 0;
         let audioQueue = [];
-        let isPlaying = false;
+        let streamRetryCount = 0;
+        const MAX_STREAM_RETRIES = 10;
 
         // Process audio queue continuously
         function processAudioQueue() {
             if (!micStreamActive || !audioContext) return;
-            
+
             while (audioQueue.length > 0) {
                 const floatSamples = audioQueue.shift();
-                
+
                 // Create audio buffer
                 const audioBuffer = audioContext.createBuffer(1, floatSamples.length, 8000);
                 audioBuffer.getChannelData(0).set(floatSamples);
-                
+
                 // Schedule playback
                 const source = audioContext.createBufferSource();
                 source.buffer = audioBuffer;
                 source.connect(audioContext.destination);
-                
+
                 // If we're behind, catch up (but add small buffer to prevent gaps)
                 const now = audioContext.currentTime;
                 if (nextPlayTime < now) {
-                    nextPlayTime = now + 0.05; // 50ms buffer
+                    nextPlayTime = now + 0.1; // 100ms buffer for smoother playback
                 }
-                
+
                 source.start(nextPlayTime);
                 nextPlayTime += audioBuffer.duration;
             }
-            
+
             // Keep processing
             if (micStreamActive) {
                 requestAnimationFrame(processAudioQueue);
@@ -771,80 +775,114 @@
         }
 
         async function startMicStream() {
-            if (micStreamActive) return;
-            
+            // Prevent multiple starts
+            if (micStreamActive) {
+                log('warn', 'Mic stream already active');
+                return;
+            }
+
             try {
                 // Create AudioContext on user interaction
                 if (!audioContext) {
                     audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 8000 });
                 }
-                
+
                 // Resume if suspended
                 if (audioContext.state === 'suspended') {
                     await audioContext.resume();
                 }
-                
+
+                // Abort any existing stream first
+                if (micAbortController) {
+                    micAbortController.abort();
+                    await new Promise(r => setTimeout(r, 100)); // Wait for cleanup
+                }
+
                 micStreamActive = true;
                 micAbortController = new AbortController();
-                nextPlayTime = audioContext.currentTime + 0.1; // Start with 100ms buffer
+                nextPlayTime = audioContext.currentTime + 0.15; // Start with 150ms buffer
                 audioQueue = [];
-                
+                streamRetryCount = 0;
+
                 document.getElementById('btn-mic-start').disabled = true;
                 document.getElementById('btn-mic-stop').disabled = false;
                 document.getElementById('mic-stream-status').textContent = '🔴 Streaming...';
                 document.getElementById('mic-stream-status').style.color = 'var(--accent-green)';
-                
+
                 log('info', 'Starting mic stream...');
-                
+
                 // Start audio queue processor
                 requestAnimationFrame(processAudioQueue);
-                
+
                 // Fetch the audio stream with retry logic
-                while (micStreamActive) {
+                while (micStreamActive && streamRetryCount < MAX_STREAM_RETRIES) {
                     try {
-                        const response = await fetch('/audio-stream', { signal: micAbortController.signal });
+                        const response = await fetch('/audio-stream', {
+                            signal: micAbortController.signal,
+                            cache: 'no-store'
+                        });
+
+                        if (!response.ok) {
+                            throw new Error(`HTTP ${response.status}`);
+                        }
+
                         const reader = response.body.getReader();
-                        
+                        streamRetryCount = 0; // Reset on successful connection
+
                         // Buffer for accumulating PCM data
                         let pcmBuffer = new Uint8Array(0);
-                        const CHUNK_SIZE = 640; // 40ms of audio at 8kHz 16-bit mono (matches DevKit send rate)
-                        
+                        const CHUNK_SIZE = 320; // 20ms of audio at 8kHz 16-bit mono
+
                         while (micStreamActive) {
                             const { done, value } = await reader.read();
                             if (done) {
-                                log('warn', 'Audio stream ended, reconnecting...');
+                                log('info', 'Audio stream ended, reconnecting...');
                                 break;
                             }
-                            
+
                             // Append new data to buffer
                             const newBuffer = new Uint8Array(pcmBuffer.length + value.length);
                             newBuffer.set(pcmBuffer);
                             newBuffer.set(value, pcmBuffer.length);
                             pcmBuffer = newBuffer;
-                            
+
                             // Process complete chunks
                             while (pcmBuffer.length >= CHUNK_SIZE) {
                                 const chunk = pcmBuffer.slice(0, CHUNK_SIZE);
                                 pcmBuffer = pcmBuffer.slice(CHUNK_SIZE);
-                                
+
                                 // Convert PCM 16-bit to Float32
                                 const samples = new Int16Array(chunk.buffer, chunk.byteOffset, chunk.length / 2);
                                 const floatSamples = new Float32Array(samples.length);
                                 for (let i = 0; i < samples.length; i++) {
                                     floatSamples[i] = samples[i] / 32768.0;
                                 }
-                                
+
                                 // Add to queue (limit queue size to prevent memory issues)
-                                if (audioQueue.length < 50) {
+                                if (audioQueue.length < 100) {
+                                    audioQueue.push(floatSamples);
+                                } else {
+                                    // Drop oldest to prevent lag buildup
+                                    audioQueue.shift();
                                     audioQueue.push(floatSamples);
                                 }
                             }
                         }
                     } catch (err) {
-                        if (err.name === 'AbortError') break;
-                        log('warn', 'Stream error, retrying in 1s...');
-                        await new Promise(r => setTimeout(r, 1000));
+                        if (err.name === 'AbortError') {
+                            log('info', 'Audio stream aborted');
+                            break;
+                        }
+                        streamRetryCount++;
+                        log('warn', `Stream error (retry ${streamRetryCount}/${MAX_STREAM_RETRIES}): ${err.message}`);
+                        if (micStreamActive && streamRetryCount < MAX_STREAM_RETRIES) {
+                            await new Promise(r => setTimeout(r, 500 * streamRetryCount)); // Exponential backoff
+                        }
                     }
+                }
+
+                if (streamRetryCount >= MAX_STREAM_RETRIES) {
+                    log('error', 'Max retries reached, stopping stream');
                 }
             } catch (err) {
                 if (err.name !== 'AbortError') {
@@ -861,13 +899,13 @@
         }
 
         function stopMicStream() {
+            log('info', 'Stopping mic stream...');
+            micStreamActive = false;
             if (micAbortController) {
                 micAbortController.abort();
                 micAbortController = null;
             }
-            micStreamActive = false;
             audioQueue = [];
-            log('info', 'Mic stream stopped');
         }
 
         function log(type, message) {
