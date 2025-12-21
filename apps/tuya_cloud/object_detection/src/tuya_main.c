@@ -44,6 +44,7 @@
 #include "ai_audio.h"
 #include "alert_audio_data.h"
 #include "tdl_audio_manage.h"
+#include "tkl_audio.h"
 
 /* TCP client for web app communication */
 #include "tcp_client.h"
@@ -102,6 +103,9 @@ char g_tcp_host[64] = "";
 static int g_voice_expected_len = 0;
 static int g_voice_received_len = 0;
 
+/* Forward declarations */
+static void update_speaker_gpio(uint8_t volume);
+
 /* for cli command register */
 extern void tuya_app_cli_init(void);
 
@@ -148,7 +152,7 @@ static void tcp_message_callback(const char *data, uint32_t len)
         /* Simplified status response */
         int heap = tal_system_get_free_heap_size();
         snprintf(response, sizeof(response), 
-            "{\"detection\":%s,\"volume\":%d,\"audio_init\":%s,\"mic_streaming\":%s,\"heap\":%d}",
+            "{\"detection\":%s,\"speaker_vol\":%d,\"audio_init\":%s,\"mic_streaming\":%s,\"heap\":%d}",
             g_detection_active ? "true" : "false",
             g_current_volume,
             g_audio_initialized ? "true" : "false",
@@ -256,6 +260,45 @@ static void tcp_message_callback(const char *data, uint32_t len)
             "{\"active\":%s,\"bytes_sent\":%u,\"frames_sent\":%u}",
             mic_streaming_is_active() ? "true" : "false",
             bytes_sent, frames_sent);
+        tcp_client_send_str(response);
+    }
+    else if (strncmp(data, "setvol:speaker:", 15) == 0) {
+        /* Set speaker volume: "setvol:speaker:<0-100>" */
+        int volume = atoi(data + 15);
+        if (volume < 0) volume = 0;
+        if (volume > 100) volume = 100;
+        
+        PR_INFO("[VOLUME] Setting speaker volume to %d", volume);
+        g_current_volume = (uint8_t)volume;
+        
+        /* Set DAC gain via ai_audio API */
+        OPERATE_RET rt = ai_audio_set_volume((uint8_t)volume);
+        if (rt != OPRT_OK) {
+            PR_ERR("[VOLUME] Failed to set speaker volume: %d", rt);
+            snprintf(response, sizeof(response), "error:vol:speaker:%d", rt);
+        } else {
+            /* Control speaker amplifier GPIO based on volume */
+            update_speaker_gpio((uint8_t)volume);
+            snprintf(response, sizeof(response), "ok:vol:speaker:%d", volume);
+        }
+        tcp_client_send_str(response);
+    }
+    else if (strncmp(data, "setvol:mic:", 11) == 0) {
+        /* Set microphone gain: "setvol:mic:<0-100>" */
+        int volume = atoi(data + 11);
+        if (volume < 0) volume = 0;
+        if (volume > 100) volume = 100;
+        
+        PR_INFO("[VOLUME] Setting mic gain to %d", volume);
+        
+        /* Set mic gain via TKL API */
+        OPERATE_RET rt = tkl_ai_set_vol(TKL_AUDIO_TYPE_BOARD, 0, volume);
+        if (rt != OPRT_OK) {
+            PR_ERR("[VOLUME] Failed to set mic gain: %d", rt);
+            snprintf(response, sizeof(response), "error:vol:mic:%d", rt);
+        } else {
+            snprintf(response, sizeof(response), "ok:vol:mic:%d", volume);
+        }
         tcp_client_send_str(response);
     }
     else if (strncmp(data, "switch on", 9) == 0) {

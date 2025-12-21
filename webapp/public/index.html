@@ -509,6 +509,50 @@
                             Stop</button>
                     </div>
 
+                    <!-- Volume Controls -->
+                    <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border-color);">
+                        <div style="margin-bottom: 0.75rem; font-size: 0.85rem;">
+                            <span style="color: var(--accent-orange);">🎚️ Volume Controls</span>
+                        </div>
+                        <!-- Speaker Volume -->
+                        <div style="margin-bottom: 0.75rem;">
+                            <div
+                                style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem;">
+                                <label style="font-size: 0.8rem; color: var(--text-secondary);">🔊 Speaker</label>
+                                <span id="speaker-vol-value"
+                                    style="font-size: 0.8rem; color: var(--accent-cyan); font-family: 'JetBrains Mono', monospace;">70</span>
+                            </div>
+                            <div style="display: flex; gap: 0.5rem; align-items: center;">
+                                <input type="range" id="speaker-volume" min="0" max="100" value="70"
+                                    style="flex: 1; height: 6px; -webkit-appearance: none; background: rgba(0,0,0,0.4); border-radius: 3px; cursor: pointer;"
+                                    oninput="document.getElementById('speaker-vol-value').textContent = this.value">
+                                <button class="btn btn-secondary"
+                                    onclick="setVolume('speaker', document.getElementById('speaker-volume').value)"
+                                    style="padding: 0.4rem 0.75rem; font-size: 0.75rem; min-width: auto;">Set</button>
+                            </div>
+                        </div>
+                        <!-- Mic Volume -->
+                        <div style="margin-bottom: 0.5rem;">
+                            <div
+                                style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem;">
+                                <label style="font-size: 0.8rem; color: var(--text-secondary);">🎤 Mic Gain</label>
+                                <span id="mic-vol-value"
+                                    style="font-size: 0.8rem; color: var(--accent-green); font-family: 'JetBrains Mono', monospace;">50</span>
+                            </div>
+                            <div style="display: flex; gap: 0.5rem; align-items: center;">
+                                <input type="range" id="mic-volume" min="0" max="100" value="50"
+                                    style="flex: 1; height: 6px; -webkit-appearance: none; background: rgba(0,0,0,0.4); border-radius: 3px; cursor: pointer;"
+                                    oninput="document.getElementById('mic-vol-value').textContent = this.value">
+                                <button class="btn btn-secondary"
+                                    onclick="setVolume('mic', document.getElementById('mic-volume').value)"
+                                    style="padding: 0.4rem 0.75rem; font-size: 0.75rem; min-width: auto;">Set</button>
+                            </div>
+                        </div>
+                        <div id="volume-status"
+                            style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.5rem; display: none;">
+                        </div>
+                    </div>
+
                     <!-- Two-way audio: Talk to DevKit (Record & Send) -->
                     <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border-color);">
                         <div style="margin-bottom: 0.5rem; font-size: 0.85rem;">
@@ -697,6 +741,26 @@
                     log('received', data.data);
                     msgCount++;
                     document.getElementById('msg-count').textContent = msgCount;
+
+                    // Handle volume status responses
+                    if (data.data && data.data.startsWith('ok:vol:')) {
+                        const parts = data.data.split(':');
+                        if (parts.length >= 4) {
+                            const type = parts[2];
+                            const vol = parseInt(parts[3]);
+                            if (type === 'speaker') {
+                                document.getElementById('speaker-volume').value = vol;
+                                document.getElementById('speaker-vol-value').textContent = vol;
+                            } else if (type === 'mic') {
+                                document.getElementById('mic-volume').value = vol;
+                                document.getElementById('mic-vol-value').textContent = vol;
+                            }
+                            const statusEl = document.getElementById('volume-status');
+                            statusEl.textContent = `✓ ${type} volume set to ${vol}`;
+                            statusEl.style.color = 'var(--accent-green)';
+                            statusEl.style.display = 'block';
+                        }
+                    }
                     break;
 
                 case 'sent_to_devkit':
@@ -1251,6 +1315,51 @@
             }
         }
 
+
+        // ==================== Volume Control ====================
+        function setVolume(type, value) {
+            const vol = parseInt(value);
+            if (isNaN(vol) || vol < 0 || vol > 100) {
+                log('error', 'Invalid volume value');
+                return;
+            }
+
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                log('error', 'WebSocket not connected');
+                return;
+            }
+
+            const cmd = `setvol:${type}:${vol}`;
+            log('info', `Setting ${type} volume to ${vol}...`);
+
+            ws.send(JSON.stringify({
+                type: 'send_to_devkit',
+                data: cmd
+            }));
+
+            // Show status
+            const statusEl = document.getElementById('volume-status');
+            statusEl.textContent = `Setting ${type} volume to ${vol}...`;
+            statusEl.style.display = 'block';
+            statusEl.style.color = 'var(--accent-orange)';
+
+            // Clear status after 3 seconds
+            setTimeout(() => {
+                statusEl.style.display = 'none';
+            }, 3000);
+        }
+
+        // Update volume UI when receiving status from DevKit
+        function updateVolumeUI(speakerVol, micVol) {
+            if (speakerVol !== undefined) {
+                document.getElementById('speaker-volume').value = speakerVol;
+                document.getElementById('speaker-vol-value').textContent = speakerVol;
+            }
+            if (micVol !== undefined) {
+                document.getElementById('mic-volume').value = micVol;
+                document.getElementById('mic-vol-value').textContent = micVol;
+            }
+        }
 
         function log(type, message) {
             const console = document.getElementById('console');
