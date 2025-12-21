@@ -1399,11 +1399,58 @@ func handleAudioStream(w http.ResponseWriter, r *http.Request) {
 
 // ==================== Auth Middleware ====================
 
+// corsMiddleware adds CORS headers for cross-origin requests
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Allow requests from any origin
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Max-Age", "86400") // 24 hours
+
+		// Handle preflight requests
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// checkBearerToken validates Authorization: Bearer <token> header
+func checkBearerToken(r *http.Request) bool {
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		return false
+	}
+	// Expect "Bearer <token>"
+	if !strings.HasPrefix(authHeader, "Bearer ") {
+		return false
+	}
+	token := strings.TrimPrefix(authHeader, "Bearer ")
+	return token == authToken
+}
+
+// Token-authenticated API endpoints (accessible from anywhere with valid token)
+var tokenAuthPaths = []string{
+	"/api/voice-message",
+}
+
+func isTokenAuthPath(path string) bool {
+	for _, p := range tokenAuthPaths {
+		if path == p {
+			return true
+		}
+	}
+	return false
+}
+
 func authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 
-		// Public endpoints
+		// Public endpoints (no auth required)
 		publicPaths := []string{
 			"/login.html",
 			"/api/login",
@@ -1434,9 +1481,23 @@ func authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// Token-authenticated endpoints: allow Bearer token OR session cookie
+		if isTokenAuthPath(path) {
+			// First try Bearer token
+			if checkBearerToken(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			// Fall through to session check
+		}
+
 		// Check session cookie
 		cookie, err := r.Cookie("session")
 		if err != nil {
+			if isTokenAuthPath(path) {
+				http.Error(w, "Unauthorized - provide Bearer token or valid session", http.StatusUnauthorized)
+				return
+			}
 			if !strings.HasPrefix(path, "/api/") {
 				http.Redirect(w, r, "/login.html", http.StatusFound)
 				return
@@ -1447,6 +1508,10 @@ func authMiddleware(next http.Handler) http.Handler {
 
 		sessionID, valid := verifySession(cookie.Value)
 		if !valid || !validateSession(sessionID) {
+			if isTokenAuthPath(path) {
+				http.Error(w, "Unauthorized - provide Bearer token or valid session", http.StatusUnauthorized)
+				return
+			}
 			if !strings.HasPrefix(path, "/api/") {
 				http.Redirect(w, r, "/login.html", http.StatusFound)
 				return
@@ -1528,8 +1593,8 @@ func main() {
 		http.Redirect(w, r, "/ble/index.html", http.StatusFound)
 	})
 
-	// Apply auth middleware
-	handler := authMiddleware(mux)
+	// Apply CORS middleware first, then auth middleware
+	handler := corsMiddleware(authMiddleware(mux))
 
 	fmt.Println()
 	fmt.Println(strings.Repeat("=", 60))
