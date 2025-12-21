@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1196,6 +1197,167 @@ func handleSend(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
+// handleVoiceMessage receives voice recordings from browser and sends to DevKit via TCP
+func handleVoiceMessage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Read audio blob (WebM/Opus format)
+	audioData, err := io.ReadAll(io.LimitReader(r.Body, 5*1024*1024)) // 5MB limit
+	if err != nil {
+		log.Printf("[VOICE] Failed to read audio: %v", err)
+		http.Error(w, "Failed to read audio", http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	contentType := r.Header.Get("Content-Type")
+	log.Printf("[VOICE] Received %d bytes (%s)", len(audioData), contentType)
+
+	// Use FFmpeg to decode WebM and encode to MP3 (DevKit expects encoded audio)
+	// FFmpeg command: ffmpeg -i - -f mp3 -ar 16000 -ac 1 -b:a 64k -af "volume=3" -
+	cmd := exec.Command("ffmpeg",
+		"-i", "pipe:0", // Read from stdin
+		"-f", "mp3", // Output MP3 format
+		"-ar", "16000", // 16kHz sample rate
+		"-ac", "1", // Mono
+		"-b:a", "64k", // 64kbps bitrate (good quality, small size)
+		"-af", "volume=3", // 3x volume boost
+		"pipe:1", // Output to stdout
+	)
+
+	// Set up pipes
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		log.Printf("[VOICE] FFmpeg stdin error: %v", err)
+		http.Error(w, "Audio processing error", http.StatusInternalServerError)
+		return
+	}
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		log.Printf("[VOICE] FFmpeg stdout error: %v", err)
+		http.Error(w, "Audio processing error", http.StatusInternalServerError)
+		return
+	}
+
+	// Start FFmpeg
+	if err := cmd.Start(); err != nil {
+		log.Printf("[VOICE] FFmpeg start error: %v", err)
+		http.Error(w, "FFmpeg not available", http.StatusInternalServerError)
+		return
+	}
+
+	// Write input audio and close stdin
+	go func() {
+		stdin.Write(audioData)
+		stdin.Close()
+	}()
+
+	// Read MP3 output
+	mp3Data, err := io.ReadAll(stdout)
+	if err != nil {
+		log.Printf("[VOICE] FFmpeg read error: %v", err)
+		http.Error(w, "Audio decode error", http.StatusInternalServerError)
+		return
+	}
+
+	// Wait for FFmpeg to finish
+	if err := cmd.Wait(); err != nil {
+		log.Printf("[VOICE] FFmpeg error: %v (input: %d bytes, output: %d bytes)", err, len(audioData), len(mp3Data))
+		// Continue even if FFmpeg reports error - we may still have usable output
+	}
+
+	log.Printf("[VOICE] Converted to %d bytes MP3 (16kHz mono, 64kbps)", len(mp3Data))
+
+	if len(mp3Data) == 0 {
+		log.Printf("[VOICE] No MP3 data produced")
+		http.Error(w, "Audio encode failed - no output", http.StatusBadRequest)
+		return
+	}
+
+	// Send MP3 to DevKit via TCP using voice protocol
+	if err := sendVoiceToDevKit(mp3Data); err != nil {
+		log.Printf("[VOICE] Failed to send to DevKit: %v", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":    err.Error(),
+			"mp3Bytes": len(mp3Data),
+		})
+		return
+	}
+
+	log.Printf("[VOICE] Sent %d bytes MP3 to DevKit", len(mp3Data))
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":  true,
+		"mp3Bytes": len(mp3Data),
+	})
+}
+
+// sendVoiceToDevKit sends MP3 audio data to DevKit via TCP using chunked protocol
+// Protocol:
+//  1. Send "voicestart:<total_length>" (length-prefixed)
+//  2. Send multiple "vd:<chunk_data>" messages (length-prefixed, binary)
+//  3. Send "voiceend" (length-prefixed)
+func sendVoiceToDevKit(mp3Data []byte) error {
+	devkitMutex.Lock()
+	defer devkitMutex.Unlock()
+
+	if devkitConn == nil {
+		return fmt.Errorf("DevKit not connected")
+	}
+
+	devkitConn.SetWriteDeadline(time.Now().Add(30 * time.Second))
+
+	// Helper to send a length-prefixed message
+	sendMsg := func(data []byte) error {
+		lenBuf := make([]byte, 4)
+		binary.LittleEndian.PutUint32(lenBuf, uint32(len(data)))
+		if _, err := devkitConn.Write(lenBuf); err != nil {
+			return err
+		}
+		if _, err := devkitConn.Write(data); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	// 1. Send start marker with total length
+	startMsg := fmt.Sprintf("voicestart:%d", len(mp3Data))
+	if err := sendMsg([]byte(startMsg)); err != nil {
+		return fmt.Errorf("send voicestart: %w", err)
+	}
+
+	// 2. Send MP3 data in chunks (each as length-prefixed "vd:" + data)
+	// Use smaller chunks (1KB) to fit in DevKit's 2KB buffer
+	const chunkSize = 1024
+	for i := 0; i < len(mp3Data); i += chunkSize {
+		end := i + chunkSize
+		if end > len(mp3Data) {
+			end = len(mp3Data)
+		}
+		chunk := mp3Data[i:end]
+
+		// Create message: "vd:" + binary MP3 data
+		msg := append([]byte("vd:"), chunk...)
+		if err := sendMsg(msg); err != nil {
+			return fmt.Errorf("send chunk at %d: %w", i, err)
+		}
+	}
+
+	// 3. Send end marker
+	if err := sendMsg([]byte("voiceend")); err != nil {
+		return fmt.Errorf("send voiceend: %w", err)
+	}
+
+	log.Printf("[VOICE] Sent voice data: %d bytes MP3 in %d chunks", len(mp3Data), (len(mp3Data)+chunkSize-1)/chunkSize)
+	return nil
+}
+
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
@@ -1356,6 +1518,7 @@ func main() {
 	mux.HandleFunc("/api/status", handleStatus)
 	mux.HandleFunc("/api/token", handleToken)
 	mux.HandleFunc("/api/send", handleSend)
+	mux.HandleFunc("/api/voice-message", handleVoiceMessage)
 	mux.HandleFunc("/health", handleHealth)
 	mux.HandleFunc("/audio-stream", handleAudioStream)
 	mux.HandleFunc("/webrtc-offer", handleWebRTCOffer)

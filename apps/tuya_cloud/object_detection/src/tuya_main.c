@@ -98,6 +98,10 @@ static uint8_t g_current_volume = DEFAULT_VOLUME;
 /* Global TCP host for mic streaming UDP */
 char g_tcp_host[64] = "";
 
+/* Voice streaming state (no buffer needed - stream directly to player) */
+static int g_voice_expected_len = 0;
+static int g_voice_received_len = 0;
+
 /* for cli command register */
 extern void tuya_app_cli_init(void);
 
@@ -172,6 +176,54 @@ static void tcp_message_callback(const char *data, uint32_t len)
             ai_audio_player_stop();
         }
         tcp_client_send_str("ok:audio_stopped");
+    }
+    else if (strncmp(data, "voicestart:", 11) == 0) {
+        /* Start of voice message (MP3 format): "voicestart:<total_length>" */
+        int total_len = atoi(data + 11);
+        PR_INFO("[VOICE] Starting MP3 stream playback (%d bytes expected)", total_len);
+        
+        /* Stop any playing audio first */
+        if (ai_audio_player_is_playing()) {
+            ai_audio_player_stop();
+            tal_system_sleep(50); /* Wait for audio to stop */
+        }
+        
+        /* Start audio player for streaming MP3 */
+        ai_audio_player_start("voice_stream");
+        g_voice_expected_len = total_len;
+        g_voice_received_len = 0;
+        
+        tcp_client_send_str("ok:voice_streaming");
+    }
+    else if (strncmp(data, "vd:", 3) == 0) {
+        /* Voice data chunk: "vd:" + binary MP3 data - stream to audio player */
+        int chunk_len = len - 3; /* Subtract "vd:" prefix */
+        const uint8_t *chunk_data = (const uint8_t *)(data + 3);
+        
+        if (chunk_len > 0) {
+            /* Stream this MP3 chunk to audio player */
+            ai_audio_player_data_write("voice_stream", (uint8_t *)chunk_data, chunk_len, 0);
+            g_voice_received_len += chunk_len;
+            
+            /* Log progress occasionally */
+            if (g_voice_received_len % 10000 < chunk_len) {
+                PR_DEBUG("[VOICE] Streaming: %d/%d bytes", g_voice_received_len, g_voice_expected_len);
+            }
+        }
+        /* No response needed for data chunks */
+    }
+    else if (strncmp(data, "voiceend", 8) == 0) {
+        /* End of voice message - signal end of stream */
+        PR_INFO("[VOICE] Stream complete: %d bytes played", g_voice_received_len);
+        
+        /* Write empty buffer with is_end=1 to signal completion */
+        ai_audio_player_data_write("voice_stream", NULL, 0, 1);
+        
+        snprintf(response, sizeof(response), "ok:voice_done:%d", g_voice_received_len);
+        tcp_client_send_str(response);
+        
+        g_voice_expected_len = 0;
+        g_voice_received_len = 0;
     }
     else if (strncmp(data, "mic on", 6) == 0) {
         /* Start microphone streaming to web app via UDP */

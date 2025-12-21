@@ -22,8 +22,8 @@ FROM docker.io/library/alpine:latest
 
 WORKDIR /app
 
-# Install Opus runtime library
-RUN apk add --no-cache opus opusfile
+# Install Opus runtime library and FFmpeg for voice message decoding
+RUN apk add --no-cache opus opusfile ffmpeg
 
 # Copy binary from builder
 COPY --from=builder /build/server .

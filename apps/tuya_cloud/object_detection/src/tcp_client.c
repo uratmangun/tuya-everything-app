@@ -321,3 +321,72 @@ OPERATE_RET tcp_client_send_str(const char *str)
     if (!str) return OPRT_INVALID_PARM;
     return tcp_client_send(str, strlen(str));
 }
+
+/**
+ * @brief Receive raw data from TCP connection (for voice messages)
+ * @param buf Buffer to store received data
+ * @param len Expected number of bytes to receive
+ * @param timeout_ms Maximum time to wait for data
+ * @return Number of bytes actually received, or negative on error
+ */
+int tcp_client_receive_data(uint8_t *buf, int len, int timeout_ms)
+{
+    if (!g_ctx.connected || g_ctx.socket_fd < 0) {
+        PR_WARN("[TCP] Cannot receive - not connected");
+        return -1;
+    }
+    
+    if (!buf || len <= 0) {
+        return -1;
+    }
+    
+    tal_mutex_lock(g_ctx.mutex);
+    
+    int total_received = 0;
+    int start_time = tal_system_get_millisecond();
+    
+    /* Set longer timeout for voice data reception */
+    tal_net_set_timeout(g_ctx.socket_fd, timeout_ms, TRANS_RECV);
+    
+    while (total_received < len) {
+        /* Check timeout */
+        int elapsed = tal_system_get_millisecond() - start_time;
+        if (elapsed > timeout_ms) {
+            PR_WARN("[TCP] Voice receive timeout after %d ms", elapsed);
+            break;
+        }
+        
+        /* Receive remaining bytes */
+        int remaining = len - total_received;
+        int chunk_size = remaining > 4096 ? 4096 : remaining;
+        
+        int recv_len = tal_net_recv(g_ctx.socket_fd, buf + total_received, chunk_size);
+        
+        if (recv_len > 0) {
+            total_received += recv_len;
+            if (total_received % 10000 < recv_len) {
+                PR_DEBUG("[TCP] Voice receive progress: %d/%d bytes", total_received, len);
+            }
+        } else if (recv_len < 0) {
+            int err = tal_net_get_errno();
+            if (err == UNW_ETIMEDOUT || err == UNW_EAGAIN || err == UNW_EWOULDBLOCK) {
+                /* Timeout, check overall timeout and continue */
+                continue;
+            }
+            PR_ERR("[TCP] Voice receive error: %d", err);
+            break;
+        } else {
+            /* recv_len == 0, connection closed? */
+            PR_WARN("[TCP] Voice receive: connection closed?");
+            break;
+        }
+    }
+    
+    /* Restore normal timeout */
+    tal_net_set_timeout(g_ctx.socket_fd, TCP_RECV_TIMEOUT_MS, TRANS_RECV);
+    
+    tal_mutex_unlock(g_ctx.mutex);
+    
+    PR_INFO("[TCP] Received %d/%d bytes of voice data", total_received, len);
+    return total_received;
+}

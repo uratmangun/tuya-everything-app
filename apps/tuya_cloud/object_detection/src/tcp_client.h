@@ -61,4 +61,13 @@ OPERATE_RET tcp_client_send(const char *data, uint32_t len);
  */
 OPERATE_RET tcp_client_send_str(const char *str);
 
+/**
+ * @brief Receive raw data from TCP (for voice messages)
+ * @param buf Buffer to store received data
+ * @param len Expected number of bytes to receive
+ * @param timeout_ms Maximum time to wait
+ * @return Number of bytes received, or negative on error
+ */
+int tcp_client_receive_data(uint8_t *buf, int len, int timeout_ms);
+
 #endif /* __TCP_CLIENT_H__ */
