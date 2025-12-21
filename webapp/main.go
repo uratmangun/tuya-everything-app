@@ -828,12 +828,21 @@ func handleWebRTCOffer(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Create Opus decoder for incoming audio (16kHz mono)
-		decoder, err := opus.NewDecoder(sampleRate, channels)
+		// Browser WebRTC sends Opus at 48kHz by default
+		// We decode at 48kHz then resample to 16kHz for DevKit
+		const browserSampleRate = 48000
+		const devkitSampleRate = 16000
+		const resampleRatio = browserSampleRate / devkitSampleRate // = 3
+		const targetPacketBytes = 640                              // 20ms at 16kHz = 320 samples * 2 bytes
+		const volumeGain = 3.0                                     // Amplify audio 3x for better clarity
+
+		// Create Opus decoder at 48kHz (browser's native rate)
+		decoder, err := opus.NewDecoder(browserSampleRate, 1) // mono
 		if err != nil {
-			log.Printf("[WEBRTC] Failed to create Opus decoder: %v", err)
+			log.Printf("[WEBRTC] Failed to create Opus decoder (48kHz): %v", err)
 			return
 		}
+		log.Printf("[WEBRTC] Opus decoder created: 48kHz mono -> will resample to 16kHz (gain: %.1fx)", volumeGain)
 
 		// Check if DevKit speaker address is registered (from NAT hole punching)
 		devkitSpeakerMutex.RLock()
@@ -861,8 +870,11 @@ func handleWebRTCOffer(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[WEBRTC] Speaker audio bridge started -> %s (NAT-mapped)", addr.String())
 
 		rtpBuf := make([]byte, 1500)
-		pcmSamples := make([]int16, 1920) // Max 120ms of audio at 16kHz
+		pcmSamples48k := make([]int16, 2880) // Max 60ms at 48kHz = 2880 samples
 		var packetsSent uint64
+
+		// Accumulator for building 640-byte packets
+		pcmAccum := make([]byte, 0, targetPacketBytes*2) // Extra capacity
 
 		for {
 			// Read RTP packet
@@ -876,10 +888,8 @@ func handleWebRTCOffer(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			// Decode Opus to PCM
-			// Note: RTP payload starts after header, but pion handles this
-			// We receive raw Opus frames from the track
-			samplesDecoded, decodeErr := decoder.Decode(rtpBuf[:n], pcmSamples)
+			// Decode Opus to PCM at 48kHz
+			samplesDecoded, decodeErr := decoder.Decode(rtpBuf[:n], pcmSamples48k)
 			if decodeErr != nil {
 				// Skip invalid packets silently (common during RTP)
 				continue
@@ -889,22 +899,49 @@ func handleWebRTCOffer(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			// Convert int16 samples to bytes (little-endian for DevKit)
-			pcmBytes := make([]byte, samplesDecoded*2)
-			for i := 0; i < samplesDecoded; i++ {
-				pcmBytes[i*2] = byte(pcmSamples[i])
-				pcmBytes[i*2+1] = byte(pcmSamples[i] >> 8)
+			// Resample 48kHz -> 16kHz using AVERAGING (better than decimation)
+			// For each output sample, average 3 input samples to preserve energy
+			samples16k := samplesDecoded / resampleRatio
+			for i := 0; i < samples16k; i++ {
+				// Average 3 consecutive samples for better quality
+				idx := i * resampleRatio
+				sum := int32(pcmSamples48k[idx])
+				if idx+1 < samplesDecoded {
+					sum += int32(pcmSamples48k[idx+1])
+				}
+				if idx+2 < samplesDecoded {
+					sum += int32(pcmSamples48k[idx+2])
+				}
+				avgSample := sum / int32(resampleRatio)
+
+				// Apply volume gain with clipping protection
+				amplified := float64(avgSample) * volumeGain
+				if amplified > 32767 {
+					amplified = 32767
+				} else if amplified < -32768 {
+					amplified = -32768
+				}
+				sample := int16(amplified)
+
+				// Convert to little-endian bytes
+				pcmAccum = append(pcmAccum, byte(sample), byte(sample>>8))
 			}
 
-			// Send PCM to DevKit speaker via NAT hole
-			if err := sendSpeakerAudio(pcmBytes); err != nil {
-				if packetsSent == 0 || packetsSent%100 == 0 {
-					log.Printf("[WEBRTC] Send to speaker failed: %v", err)
-				}
-			} else {
-				packetsSent++
-				if packetsSent%500 == 0 {
-					log.Printf("[WEBRTC] Speaker audio: %d packets sent", packetsSent)
+			// Send complete 640-byte packets
+			for len(pcmAccum) >= targetPacketBytes {
+				packet := pcmAccum[:targetPacketBytes]
+				pcmAccum = pcmAccum[targetPacketBytes:]
+
+				// Send PCM to DevKit speaker via NAT hole
+				if err := sendSpeakerAudio(packet); err != nil {
+					if packetsSent == 0 || packetsSent%100 == 0 {
+						log.Printf("[WEBRTC] Send to speaker failed: %v", err)
+					}
+				} else {
+					packetsSent++
+					if packetsSent%500 == 0 {
+						log.Printf("[WEBRTC] Speaker audio: %d packets sent (640 bytes each)", packetsSent)
+					}
 				}
 			}
 		}
