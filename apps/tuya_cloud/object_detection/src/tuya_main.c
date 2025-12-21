@@ -61,6 +61,9 @@
 /* Microphone streaming for web app */
 #include "mic_streaming.h"
 
+/* Speaker streaming for two-way audio (talk-back from browser) */
+#include "speaker_streaming.h"
+
 /* Switch DP ID - typically DP 1 for switch products */
 #define SWITCH_DP_ID         1
 /* Volume DP ID - DP 3 for volume control */
@@ -630,6 +633,15 @@ void user_main(void)
     }
 
     /* Note: mic_streaming_init() was called earlier, before tdl_audio_open() */
+
+    /* Initialize speaker streaming for two-way audio (talk-back from browser) */
+    PR_INFO("Initializing speaker streaming for two-way audio...");
+    rt = speaker_streaming_init();
+    if (rt != OPRT_OK) {
+        PR_WARN("Failed to initialize speaker streaming: %d (talk-back disabled)", rt);
+    } else {
+        PR_NOTICE("Speaker streaming initialized - listening on UDP port 5002");
+    }
 
 #if !defined(PLATFORM_UBUNTU) || (PLATFORM_UBUNTU == 0)
     tal_cli_init();

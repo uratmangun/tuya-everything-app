@@ -62,6 +62,18 @@ var (
 	devkitConn          net.Conn
 	devkitAuthenticated bool
 	devkitMutex         sync.RWMutex
+	devkitIP            net.IP // Track DevKit IP for speaker UDP (from TCP - may not work through NAT)
+)
+
+// Speaker UDP configuration
+const speakerUDPPort = 5002
+const speakerPingMarker = 0xFE // DevKit sends this to register its NAT address
+
+// DevKit speaker NAT address (from UDP ping - this is the NAT-translated address)
+var (
+	devkitSpeakerAddr  *net.UDPAddr // NAT-mapped address for sending speaker audio
+	devkitSpeakerMutex sync.RWMutex
+	speakerPingCount   uint64
 )
 
 // WebSocket clients
@@ -345,6 +357,11 @@ func handleDevKitConnection(conn net.Conn) {
 	}
 	devkitConn = conn
 	devkitAuthenticated = true
+	// Track DevKit IP for sending speaker audio via UDP
+	if tcpAddr, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
+		devkitIP = tcpAddr.IP
+		log.Printf("[TCP] DevKit IP tracked for speaker UDP: %s", devkitIP.String())
+	}
 	devkitMutex.Unlock()
 
 	broadcastToWeb(map[string]interface{}{
@@ -532,6 +549,72 @@ func startPacer() {
 			// Buffer empty - let browser's PLC handle it
 		}
 	}
+}
+
+// ==================== Speaker UDP Server (NAT Hole Punching) ====================
+
+// Global UDP connection for sending speaker audio (reused for efficiency)
+var speakerUDPConn *net.UDPConn
+
+func startSpeakerUDPServer() {
+	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("0.0.0.0:%d", speakerUDPPort))
+	if err != nil {
+		log.Fatalf("[SPEAKER-UDP] Failed to resolve address: %v", err)
+	}
+
+	conn, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		log.Fatalf("[SPEAKER-UDP] Failed to start: %v", err)
+	}
+	speakerUDPConn = conn
+
+	log.Printf("[SPEAKER-UDP] Listening on port %d for DevKit pings", speakerUDPPort)
+
+	buf := make([]byte, 16)
+
+	for {
+		n, remoteAddr, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			log.Printf("[SPEAKER-UDP] Read error: %v", err)
+			continue
+		}
+
+		// Check for speaker ping marker (0xFE)
+		if n == 1 && buf[0] == speakerPingMarker {
+			speakerPingCount++
+
+			// Update DevKit speaker NAT address
+			devkitSpeakerMutex.Lock()
+			oldAddr := devkitSpeakerAddr
+			devkitSpeakerAddr = remoteAddr
+			devkitSpeakerMutex.Unlock()
+
+			// Log address changes or periodically
+			if oldAddr == nil || oldAddr.String() != remoteAddr.String() {
+				log.Printf("[SPEAKER-UDP] DevKit NAT address registered: %s", remoteAddr.String())
+			} else if speakerPingCount%60 == 0 { // Log every ~5 minutes (60 pings at 5s interval)
+				log.Printf("[SPEAKER-UDP] Ping #%d from %s (keepalive)", speakerPingCount, remoteAddr.String())
+			}
+		}
+	}
+}
+
+// sendSpeakerAudio sends PCM audio to DevKit through NAT hole
+func sendSpeakerAudio(pcmBytes []byte) error {
+	devkitSpeakerMutex.RLock()
+	addr := devkitSpeakerAddr
+	devkitSpeakerMutex.RUnlock()
+
+	if addr == nil {
+		return fmt.Errorf("no DevKit speaker address registered")
+	}
+
+	if speakerUDPConn == nil {
+		return fmt.Errorf("speaker UDP connection not ready")
+	}
+
+	_, err := speakerUDPConn.WriteToUDP(pcmBytes, addr)
+	return err
 }
 
 // ==================== WebSocket Handler ====================
@@ -736,7 +819,98 @@ func handleWebRTCOffer(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[WEBRTC] ICE gathering state: %s", state.String())
 	})
 
-	// Add the audio track
+	// Handle incoming audio track from browser (talk-back to DevKit)
+	peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
+		log.Printf("[WEBRTC] Incoming track: %s (codec: %s)", track.Kind(), track.Codec().MimeType)
+
+		// Only handle audio tracks
+		if track.Kind() != webrtc.RTPCodecTypeAudio {
+			return
+		}
+
+		// Create Opus decoder for incoming audio (16kHz mono)
+		decoder, err := opus.NewDecoder(sampleRate, channels)
+		if err != nil {
+			log.Printf("[WEBRTC] Failed to create Opus decoder: %v", err)
+			return
+		}
+
+		// Check if DevKit speaker address is registered (from NAT hole punching)
+		devkitSpeakerMutex.RLock()
+		addr := devkitSpeakerAddr
+		devkitSpeakerMutex.RUnlock()
+
+		if addr == nil {
+			log.Printf("[WEBRTC] No DevKit speaker address registered - waiting for ping")
+			// Wait a bit for DevKit to register
+			for i := 0; i < 10; i++ {
+				time.Sleep(500 * time.Millisecond)
+				devkitSpeakerMutex.RLock()
+				addr = devkitSpeakerAddr
+				devkitSpeakerMutex.RUnlock()
+				if addr != nil {
+					break
+				}
+			}
+			if addr == nil {
+				log.Printf("[WEBRTC] DevKit speaker not registered after 5s - cannot send audio")
+				return
+			}
+		}
+
+		log.Printf("[WEBRTC] Speaker audio bridge started -> %s (NAT-mapped)", addr.String())
+
+		rtpBuf := make([]byte, 1500)
+		pcmSamples := make([]int16, 1920) // Max 120ms of audio at 16kHz
+		var packetsSent uint64
+
+		for {
+			// Read RTP packet
+			n, _, readErr := track.Read(rtpBuf)
+			if readErr != nil {
+				if readErr == io.EOF {
+					log.Printf("[WEBRTC] Track ended (sent %d packets)", packetsSent)
+				} else {
+					log.Printf("[WEBRTC] Track read error: %v", readErr)
+				}
+				return
+			}
+
+			// Decode Opus to PCM
+			// Note: RTP payload starts after header, but pion handles this
+			// We receive raw Opus frames from the track
+			samplesDecoded, decodeErr := decoder.Decode(rtpBuf[:n], pcmSamples)
+			if decodeErr != nil {
+				// Skip invalid packets silently (common during RTP)
+				continue
+			}
+
+			if samplesDecoded == 0 {
+				continue
+			}
+
+			// Convert int16 samples to bytes (little-endian for DevKit)
+			pcmBytes := make([]byte, samplesDecoded*2)
+			for i := 0; i < samplesDecoded; i++ {
+				pcmBytes[i*2] = byte(pcmSamples[i])
+				pcmBytes[i*2+1] = byte(pcmSamples[i] >> 8)
+			}
+
+			// Send PCM to DevKit speaker via NAT hole
+			if err := sendSpeakerAudio(pcmBytes); err != nil {
+				if packetsSent == 0 || packetsSent%100 == 0 {
+					log.Printf("[WEBRTC] Send to speaker failed: %v", err)
+				}
+			} else {
+				packetsSent++
+				if packetsSent%500 == 0 {
+					log.Printf("[WEBRTC] Speaker audio: %d packets sent", packetsSent)
+				}
+			}
+		}
+	})
+
+	// Add the audio track (DevKit mic -> Browser)
 	audioTrackMutex.RLock()
 	track := audioTrack
 	audioTrackMutex.RUnlock()
@@ -1116,6 +1290,9 @@ func main() {
 	// Start TCP keepalive pinger
 	go startTCPKeepalive()
 
+	// Start Speaker UDP server (NAT hole punching for talk-back)
+	go startSpeakerUDPServer()
+
 	// Setup HTTP routes
 	mux := http.NewServeMux()
 
@@ -1160,7 +1337,8 @@ func main() {
 	fmt.Println(strings.Repeat("=", 60))
 	fmt.Printf("  Web UI + WS: http://%s:%s\n", localIP, httpPort)
 	fmt.Printf("  TCP Server:  %s:%s (for DevKit commands)\n", localIP, tcpPort)
-	fmt.Printf("  UDP Server:  %s:%s (for raw PCM audio)\n", localIP, udpPort)
+	fmt.Printf("  UDP Server:  %s:%s (for mic PCM audio)\n", localIP, udpPort)
+	fmt.Printf("  UDP Speaker: %s:%d (for talk-back NAT hole)\n", localIP, speakerUDPPort)
 	fmt.Println()
 	fmt.Printf("  Auth Username: %s\n", authUsername)
 	fmt.Printf("  Auth Password: %s\n", strings.Repeat("*", len(authPassword)))

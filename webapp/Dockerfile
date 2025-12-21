@@ -31,8 +31,8 @@ COPY --from=builder /build/server .
 # Copy public files
 COPY public ./public
 
-# Expose ports: HTTP, TCP, UDP (for raw PCM audio)
-EXPOSE 3000 5000 5001/udp
+# Expose ports: HTTP, TCP, UDP mic, UDP speaker
+EXPOSE 3000 5000 5001/udp 5002/udp
 
 # Run
 CMD ["./server"]

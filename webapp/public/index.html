@@ -508,6 +508,24 @@
                         <button id="btn-mic-stop" class="btn btn-secondary" onclick="stopMicStream()" disabled>⏹
                             Stop</button>
                     </div>
+
+                    <!-- Two-way audio: Talk back to DevKit -->
+                    <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border-color);">
+                        <div style="margin-bottom: 0.5rem; font-size: 0.85rem;">
+                            <span style="color: var(--accent-cyan);">🔊 Talk to DevKit Speaker</span>
+                            <span id="talk-status" style="color: var(--text-secondary); margin-left: 0.5rem;">(click
+                                Start to talk)</span>
+                        </div>
+                        <div class="btn-group">
+                            <button id="btn-talk-start" class="btn btn-primary" onclick="startTalking()"
+                                style="background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);">
+                                🎙️ Start Talking
+                            </button>
+                            <button id="btn-talk-stop" class="btn btn-secondary" onclick="stopTalking()" disabled>
+                                ⏹ Stop
+                            </button>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -992,6 +1010,148 @@
 
             // Stop local playback
             stopMicStreamLocal();
+        }
+
+        // ==================== Two-Way Audio (Talk Back) ====================
+        let localMicStream = null;
+        let talkActive = false;
+        let talkPeerConnection = null;
+
+        // Start talking (Start/Stop button mode)
+        async function startTalking() {
+            if (talkActive) return;
+
+            try {
+                log('info', '🎙️ Starting talk-back...');
+
+                // Update UI - disable start, enable stop
+                document.getElementById('btn-talk-start').disabled = true;
+                document.getElementById('btn-talk-stop').disabled = false;
+                document.getElementById('talk-status').textContent = '🔴 Connecting...';
+                document.getElementById('talk-status').style.color = 'var(--accent-red)';
+
+                // Request microphone access with optimized settings
+                localMicStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        sampleRate: 16000,
+                        channelCount: 1,
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true
+                    }
+                });
+
+                log('info', 'Browser mic captured, connecting WebRTC for talk-back...');
+
+                // Connect WebRTC with send capability
+                await connectTalkWebRTC();
+
+                talkActive = true;
+                document.getElementById('talk-status').textContent = '🎙️ Talking...';
+                document.getElementById('talk-status').style.color = 'var(--accent-green)';
+
+            } catch (err) {
+                log('error', 'Talk-back error: ' + err.message);
+                stopTalkingLocal();
+            }
+        }
+
+        // Stop talking
+        function stopTalking() {
+            if (!talkActive && !localMicStream) return;
+
+            log('info', '🎙️ Stopping talk-back...');
+            stopTalkingLocal();
+        }
+
+        // Stop talking (local cleanup only)
+        function stopTalkingLocal() {
+            talkActive = false;
+
+            // Stop microphone stream
+            if (localMicStream) {
+                localMicStream.getTracks().forEach(t => t.stop());
+                localMicStream = null;
+            }
+
+            // Close talk peer connection
+            if (talkPeerConnection) {
+                talkPeerConnection.close();
+                talkPeerConnection = null;
+            }
+
+            // Update UI - enable start, disable stop
+            document.getElementById('btn-talk-start').disabled = false;
+            document.getElementById('btn-talk-stop').disabled = true;
+            document.getElementById('talk-status').textContent = '(click Start to talk)';
+            document.getElementById('talk-status').style.color = 'var(--text-secondary)';
+        }
+
+        // Connect WebRTC for talk-back (send audio to server)
+        async function connectTalkWebRTC() {
+            try {
+                const config = {
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun1.l.google.com:19302' },
+                        {
+                            urls: 'turn:13.212.218.43:3478',
+                            username: 'turnuser',
+                            credential: 'TuyaT5DevKit2024'
+                        },
+                        {
+                            urls: 'turn:13.212.218.43:3478?transport=tcp',
+                            username: 'turnuser',
+                            credential: 'TuyaT5DevKit2024'
+                        }
+                    ]
+                };
+
+                talkPeerConnection = new RTCPeerConnection(config);
+
+                // Add local mic track (send audio to server -> DevKit speaker)
+                if (localMicStream) {
+                    localMicStream.getTracks().forEach(track => {
+                        talkPeerConnection.addTrack(track, localMicStream);
+                        log('info', 'Added mic track: ' + track.kind);
+                    });
+                }
+
+                // Log connection state
+                talkPeerConnection.onconnectionstatechange = function () {
+                    log('info', `Talk WebRTC: ${talkPeerConnection.connectionState}`);
+                    if (talkPeerConnection.connectionState === 'connected') {
+                        document.getElementById('talk-status').textContent = '🎙️ Transmitting...';
+                        document.getElementById('talk-status').style.color = 'var(--accent-green)';
+                    }
+                };
+
+                // Log ICE state
+                talkPeerConnection.oniceconnectionstatechange = function () {
+                    log('info', `Talk ICE: ${talkPeerConnection.iceConnectionState}`);
+                };
+
+                // Create offer (send-only for talk-back)
+                const offer = await talkPeerConnection.createOffer();
+                await talkPeerConnection.setLocalDescription(offer);
+
+                log('info', 'Sending talk-back WebRTC offer...');
+                const response = await fetch('/webrtc-offer', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(offer)
+                });
+
+                if (!response.ok) throw new Error(`Server: ${response.status}`);
+
+                const answer = await response.json();
+                await talkPeerConnection.setRemoteDescription(answer);
+                log('info', '✅ Talk-back WebRTC connected');
+
+            } catch (error) {
+                log('error', 'Talk WebRTC error: ' + error.message);
+                throw error;
+            }
         }
 
 
