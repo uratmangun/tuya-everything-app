@@ -7,7 +7,7 @@
  * 2. WiFi direct connection capability
  * 3. BLE channel handler for receiving config commands
  *
- * Web Bluetooth Page: https://ble-config-web.vercel.app
+ * Web Bluetooth Page: https://your-domain/ble
  *
  * @copyright Copyright (c) 2021-2025 Tuya Inc. All Rights Reserved.
  */

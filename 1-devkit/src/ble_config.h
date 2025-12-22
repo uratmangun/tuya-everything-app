@@ -3,7 +3,7 @@
  * @brief BLE Configuration Handler for Web Bluetooth
  * 
  * Provides BLE-based configuration for TCP server and WiFi settings.
- * Works with the Web Bluetooth configuration page at https://ble-config-web.vercel.app
+ * Works with the Web Bluetooth configuration page at https://your-domain/ble
  *
  * @copyright Copyright (c) 2021-2025 Tuya Inc. All Rights Reserved.
  */
