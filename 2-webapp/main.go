@@ -766,12 +766,12 @@ func handleWebRTCOffer(w http.ResponseWriter, r *http.Request) {
 			{URLs: []string{"stun:stun1.l.google.com:19302"}},
 			// Self-hosted TURN server on VPS (relay for remaining ~20%)
 			{
-				URLs:       []string{"turn:13.212.218.43:3478"},
+				URLs:       []string{"turn:YOUR_VPS_IP:3478"},
 				Username:   "turnuser",
 				Credential: "TuyaT5DevKit2024",
 			},
 			{
-				URLs:       []string{"turn:13.212.218.43:3478?transport=tcp"},
+				URLs:       []string{"turn:YOUR_VPS_IP:3478?transport=tcp"},
 				Username:   "turnuser",
 				Credential: "TuyaT5DevKit2024",
 			},

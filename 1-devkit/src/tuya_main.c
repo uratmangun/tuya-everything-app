@@ -729,14 +729,11 @@ void user_main(void)
 
     /* Note: mic_streaming_init() was called earlier, before tdl_audio_open() */
 
-    /* Initialize speaker streaming for two-way audio (talk-back from browser) */
-    PR_INFO("Initializing speaker streaming for two-way audio...");
-    rt = speaker_streaming_init();
-    if (rt != OPRT_OK) {
-        PR_WARN("Failed to initialize speaker streaming: %d (talk-back disabled)", rt);
-    } else {
-        PR_NOTICE("Speaker streaming initialized - listening on UDP port 5002");
-    }
+    /* Initialize speaker streaming for two-way audio (talk-back from browser)
+     * Note: We need to pass the TCP host for NAT hole punching, but g_tcp_host
+     * is not set yet (it's configured later after BLE/WiFi). So we initialize
+     * speaker streaming later, after g_tcp_host is determined. */
+    /* speaker_streaming_init() is now called after TCP host configuration */
 
 #if !defined(PLATFORM_UBUNTU) || (PLATFORM_UBUNTU == 0)
     tal_cli_init();
@@ -886,24 +883,20 @@ void user_main(void)
     } else {
         PR_ERR("Failed to initialize TCP client");
     }
-    /* Note: RTSP tunnel feature disabled - see plan/TTS_STREAMING_PLAN.md for audio streaming */
-#if RTSP_TUNNEL_ENABLED
-    /* RTSP tunnel auto-start if enabled at compile time */
-    {
-        rtsp_tunnel_config_t cfg = {0};
-        strncpy(cfg.camera_host, RTSP_CAMERA_HOST, sizeof(cfg.camera_host) - 1);
-        cfg.camera_port = RTSP_CAMERA_PORT;
-        strncpy(cfg.vps_host, RTSP_VPS_HOST, sizeof(cfg.vps_host) - 1);
-        cfg.vps_port = RTSP_VPS_PORT;
-        
-        if (rtsp_tunnel_init(&cfg, NULL) == OPRT_OK && rtsp_tunnel_start() == OPRT_OK) {
-            g_rtsp_tunnel_active = true;
-            PR_NOTICE("RTSP tunnel started automatically");
+
+    /* Initialize speaker streaming for two-way audio (talk-back from browser)
+     * This must be done after g_tcp_host is configured so it uses the correct VPS address */
+    if (g_tcp_host[0]) {
+        PR_INFO("Initializing speaker streaming for two-way audio...");
+        rt = speaker_streaming_init(g_tcp_host);
+        if (rt != OPRT_OK) {
+            PR_WARN("Failed to initialize speaker streaming: %d (talk-back disabled)", rt);
         } else {
-            PR_ERR("Failed to auto-start RTSP tunnel");
+            PR_NOTICE("Speaker streaming initialized - listening on UDP port 5002");
         }
+    } else {
+        PR_WARN("No TCP host configured - speaker streaming disabled");
     }
-#endif
 
     for (;;) {
 #if !SKIP_TUYA_CLOUD

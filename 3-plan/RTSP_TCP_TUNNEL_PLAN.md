@@ -9,7 +9,7 @@ This document describes the implemented TCP tunnel for forwarding RTSP camera st
 ```
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
 │  RTSP Camera    │     │  T5AI DevKit    │     │     VPS         │
-│  (Local LAN)    │ TCP │  (TCP Tunnel)   │ TCP │  13.212.218.43  │
+│  (Local LAN)    │ TCP │  (TCP Tunnel)   │ TCP │  YOUR_VPS_IP    │
 │  192.168.x.x    │◄────┤                 ├────►│                 │
 │  Port 554       │     │                 │     │  Port 8554      │
 └─────────────────┘     │                 │     │  (RTSP Relay)   │
@@ -63,7 +63,7 @@ export RTSP_CAMERA_HOST="192.168.1.100"   # Your camera's IP
 export RTSP_CAMERA_PORT="554"              # Usually 554
 
 # VPS Tunnel Endpoint
-export RTSP_VPS_HOST="13.212.218.43"       # Your VPS IP
+export RTSP_VPS_HOST="YOUR_VPS_IP"         # Your VPS IP
 export RTSP_VPS_PORT="8554"                # RTSP relay port
 
 # Auto-start: "1" to start on boot, "0" for manual

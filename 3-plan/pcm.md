@@ -218,7 +218,7 @@ static void udp_keepalive_task(void *arg)
 mic_streaming_init();
 
 // Start streaming to VPS
-mic_streaming_start("13.212.218.43", 5001);
+mic_streaming_start("YOUR_VPS_IP", 5001);
 ```
 
 ### Stop Streaming
@@ -439,7 +439,7 @@ func handleWebRTCOffer(w http.ResponseWriter, r *http.Request) {
         ICEServers: []webrtc.ICEServer{
             {URLs: []string{"stun:stun.l.google.com:19302"}},
             {
-                URLs:       []string{"turn:13.212.218.43:3478"},
+                URLs:       []string{"turn:YOUR_VPS_IP:3478"},
                 Username:   "turnuser",
                 Credential: "TuyaT5DevKit2024",
             },
@@ -479,7 +479,7 @@ async function connectWebRTC() {
         iceServers: [
             { urls: 'stun:stun.l.google.com:19302' },
             {
-                urls: 'turn:13.212.218.43:3478',
+                urls: 'turn:YOUR_VPS_IP:3478',
                 username: 'turnuser',
                 credential: 'TuyaT5DevKit2024'
             }
@@ -573,7 +573,7 @@ ICEServers: []webrtc.ICEServer{
     {URLs: []string{"stun:stun.l.google.com:19302"}},      // Google STUN
     {URLs: []string{"stun:stun1.l.google.com:19302"}},     // Backup STUN
     {
-        URLs:       []string{"turn:13.212.218.43:3478"},   // Self-hosted TURN
+        URLs:       []string{"turn:YOUR_VPS_IP:3478"},   // Self-hosted TURN
         Username:   "turnuser",
         Credential: "TuyaT5DevKit2024",
     },

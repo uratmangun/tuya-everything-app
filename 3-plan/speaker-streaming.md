@@ -109,7 +109,7 @@ static uint32_t g_pings_sent = 0;
 
 /* VPS host from compile-time definition */
 #ifndef TCP_SERVER_HOST
-#define TCP_SERVER_HOST "13.212.218.43"  /* Default fallback */
+#define TCP_SERVER_HOST "YOUR_VPS_IP"  /* Default fallback */
 #endif
 
 /**
@@ -701,8 +701,8 @@ async function connectTalkWebRTC() {
         iceServers: [
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' },
-            { urls: 'turn:13.212.218.43:3478', username: 'turnuser', credential: 'TuyaT5DevKit2024' },
-            { urls: 'turn:13.212.218.43:3478?transport=tcp', username: 'turnuser', credential: 'TuyaT5DevKit2024' }
+            { urls: 'turn:YOUR_VPS_IP:3478', username: 'turnuser', credential: 'TuyaT5DevKit2024' },
+            { urls: 'turn:YOUR_VPS_IP:3478?transport=tcp', username: 'turnuser', credential: 'TuyaT5DevKit2024' }
         ]
     };
 

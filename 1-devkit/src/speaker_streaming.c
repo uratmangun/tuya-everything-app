@@ -87,10 +87,8 @@ static uint32_t g_pings_sent = 0;
 static uint32_t g_underruns = 0;
 static uint32_t g_overruns = 0;
 
-/* VPS host from compile-time definition */
-#ifndef TCP_SERVER_HOST
-#define TCP_SERVER_HOST "13.212.218.43"  /* Default fallback */
-#endif
+/* VPS host storage for dynamic configuration */
+static char g_vps_host[64] = "";
 
 /**
  * @brief Write data to jitter buffer (producer)
@@ -305,17 +303,27 @@ static void speaker_playback_task(void *arg)
 
 /**
  * @brief Initialize speaker streaming module
+ * @param host VPS server host for NAT hole punching (same as TCP server)
  */
-OPERATE_RET speaker_streaming_init(void)
+OPERATE_RET speaker_streaming_init(const char *host)
 {
     OPERATE_RET rt;
+
+    if (!host || strlen(host) == 0) {
+        PR_ERR("[SPEAKER] Invalid host parameter");
+        return OPRT_INVALID_PARM;
+    }
 
     if (g_speaker_active) {
         PR_WARN("[SPEAKER] Already initialized");
         return OPRT_OK;
     }
 
-    PR_INFO("[SPEAKER] Initializing with jitter buffer (%u bytes, prefill %u bytes)...", 
+    /* Store the VPS host for later use */
+    strncpy(g_vps_host, host, sizeof(g_vps_host) - 1);
+    g_vps_host[sizeof(g_vps_host) - 1] = '\0';
+
+    PR_INFO("[SPEAKER] Initializing with jitter buffer (%u bytes, prefill %u bytes)...",
             JITTER_BUFFER_SIZE, PREFILL_THRESHOLD);
 
     /* Create buffer mutex */
@@ -332,21 +340,20 @@ OPERATE_RET speaker_streaming_init(void)
     g_playback_started = false;
     memset(g_jitter_buffer, 0, JITTER_BUFFER_SIZE);
 
-    /* Use compile-time VPS host */
-    const char *vps_host = TCP_SERVER_HOST;
-    PR_INFO("[SPEAKER] Using VPS host: %s", vps_host);
+    /* Use the host provided at init */
+    PR_INFO("[SPEAKER] Using VPS host: %s", g_vps_host);
     
-    g_vps_addr = tal_net_str2addr(vps_host);
+    g_vps_addr = tal_net_str2addr(g_vps_host);
     if (g_vps_addr == 0) {
-        rt = tal_net_gethostbyname(vps_host, &g_vps_addr);
+        rt = tal_net_gethostbyname(g_vps_host, &g_vps_addr);
         if (rt != OPRT_OK || g_vps_addr == 0) {
-            PR_ERR("[SPEAKER] Failed to resolve VPS address: %s", vps_host);
+            PR_ERR("[SPEAKER] Failed to resolve VPS address: %s", g_vps_host);
             tal_mutex_release(g_buf_mutex);
             g_buf_mutex = NULL;
             return OPRT_COM_ERROR;
         }
     }
-    PR_INFO("[SPEAKER] VPS address: %s -> %s", vps_host, tal_net_addr2str(g_vps_addr));
+    PR_INFO("[SPEAKER] VPS address: %s -> %s", g_vps_host, tal_net_addr2str(g_vps_addr));
 
     /* Create UDP socket */
     g_udp_socket = tal_net_socket_create(PROTOCOL_UDP);

@@ -21,9 +21,10 @@ extern "C" {
  * Creates UDP socket on port 5002 and starts receiver thread.
  * Audio received will be played through the DevKit speaker.
  *
+ * @param host VPS server host (IP or hostname) for NAT hole punching
  * @return OPRT_OK on success
  */
-OPERATE_RET speaker_streaming_init(void);
+OPERATE_RET speaker_streaming_init(const char *host);
 
 /**
  * @brief Stop speaker streaming

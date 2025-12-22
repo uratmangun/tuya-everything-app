@@ -58,43 +58,6 @@
 // #define TUYA_NETCFG_PINCODE   "69832860"
 
 /**
- * @brief RTSP Tunnel Configuration
- * 
- * These settings configure the RTSP tunnel that forwards local camera
- * streams to the VPS through the DevKit.
- * 
- * Environment variables (via build script):
- * - RTSP_CAMERA_HOST: Local RTSP camera IP (e.g., "192.168.1.100")
- * - RTSP_CAMERA_PORT: Camera RTSP port (default: 554)
- * - RTSP_VPS_HOST: VPS hostname/IP for tunnel endpoint
- * - RTSP_VPS_PORT: VPS port for RTSP tunnel (default: 8554)
- * - RTSP_TUNNEL_ENABLED: Set to "1" to enable tunnel on startup
- */
-
-// RTSP Camera Configuration
-#ifndef RTSP_CAMERA_HOST
-#define RTSP_CAMERA_HOST     "192.168.1.100"
-#endif
-
-#ifndef RTSP_CAMERA_PORT
-#define RTSP_CAMERA_PORT     554
-#endif
-
-// VPS Tunnel Endpoint
-#ifndef RTSP_VPS_HOST
-#define RTSP_VPS_HOST        "13.212.218.43"
-#endif
-
-#ifndef RTSP_VPS_PORT
-#define RTSP_VPS_PORT        8554
-#endif
-
-// Auto-start tunnel on boot (set to 1 to enable)
-#ifndef RTSP_TUNNEL_ENABLED
-#define RTSP_TUNNEL_ENABLED  0
-#endif
-
-/**
  * @brief Skip Tuya Cloud Services
  * 
  * When set to 1, disables Tuya Cloud IoT features (Smart Life app, cloud DP sync).

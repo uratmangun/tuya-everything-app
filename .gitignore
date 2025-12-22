@@ -28,7 +28,6 @@ dist
 /.set_example
 /dist
 *monitor.log
-what/
 
 # Explainer video
 explainer-video/node_modules/

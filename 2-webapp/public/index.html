@@ -503,6 +503,9 @@
                         <span id="mic-stream-status" style="color: var(--text-secondary); margin-left: 0.5rem;">(click
                             Start to listen)</span>
                     </div>
+                    <!-- Mic stream waveform canvas -->
+                    <canvas id="mic-waveform-canvas" width="280" height="40"
+                        style="display: none; background: rgba(0,0,0,0.3); border-radius: 4px; margin-bottom: 0.5rem; width: 100%;"></canvas>
                     <div class="btn-group">
                         <button id="btn-mic-start" class="btn btn-primary" onclick="startMicStream()">▶ Start</button>
                         <button id="btn-mic-stop" class="btn btn-secondary" onclick="stopMicStream()" disabled>⏹
@@ -925,12 +928,12 @@
                         { urls: 'stun:stun1.l.google.com:19302' },
                         // Self-hosted TURN server (relay for remaining ~20%)
                         {
-                            urls: 'turn:13.212.218.43:3478',
+                            urls: 'turn:YOUR_VPS_IP:3478',
                             username: 'turnuser',
                             credential: 'TuyaT5DevKit2024'
                         },
                         {
-                            urls: 'turn:13.212.218.43:3478?transport=tcp',
+                            urls: 'turn:YOUR_VPS_IP:3478?transport=tcp',
                             username: 'turnuser',
                             credential: 'TuyaT5DevKit2024'
                         }
@@ -947,6 +950,8 @@
                     audioEl.play().catch(e => {
                         log('warn', 'Audio autoplay blocked');
                     });
+                    // Start waveform visualization for received mic audio
+                    startMicStreamWaveform(event.streams[0]);
                 };
 
                 // Log connection state changes
@@ -955,10 +960,14 @@
                     if (peerConnection.connectionState === 'connected') {
                         document.getElementById('mic-stream-status').textContent = '🎵 WebRTC (Opus)';
                         document.getElementById('mic-stream-status').style.color = 'var(--accent-green)';
+                        document.getElementById('mic-waveform-canvas').style.display = 'block';
                     } else if (peerConnection.connectionState === 'failed') {
                         if (micStreamActive) {
                             setTimeout(() => { if (micStreamActive) connectWebRTC(); }, 2000);
                         }
+                    } else if (peerConnection.connectionState === 'disconnected' || peerConnection.connectionState === 'closed') {
+                        stopMicStreamWaveform();
+                        document.getElementById('mic-waveform-canvas').style.display = 'none';
                     }
                 };
 
@@ -1046,6 +1055,9 @@
         function stopMicStreamLocal() {
             micStreamActive = false;
 
+            // Stop mic stream waveform
+            stopMicStreamWaveform();
+
             // Close WebRTC peer connection
             if (peerConnection) {
                 peerConnection.close();
@@ -1062,6 +1074,7 @@
             document.getElementById('btn-mic-stop').disabled = true;
             document.getElementById('mic-stream-status').textContent = '(click Start to listen)';
             document.getElementById('mic-stream-status').style.color = 'var(--text-secondary)';
+            document.getElementById('mic-waveform-canvas').style.display = 'none';
         }
 
 
@@ -1094,7 +1107,80 @@
         let audioContext = null;
         let analyser = null;
         let waveformInterval = null;
+        let micStreamAudioContext = null;
+        let micStreamAnalyser = null;
+        let micStreamWaveformInterval = null;
         const MAX_RECORD_SECONDS = 30; // 30 second limit
+
+        // ==================== Mic Stream Waveform ====================
+        // Start waveform visualization for mic stream (WebRTC received audio)
+        function startMicStreamWaveform(stream) {
+            if (!stream) return;
+
+            // Stop any existing waveform first
+            stopMicStreamWaveform();
+
+            try {
+                micStreamAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+                micStreamAnalyser = micStreamAudioContext.createAnalyser();
+                micStreamAnalyser.fftSize = 256;
+
+                const source = micStreamAudioContext.createMediaStreamSource(stream);
+                source.connect(micStreamAnalyser);
+
+                const canvas = document.getElementById('mic-waveform-canvas');
+                const ctx = canvas.getContext('2d');
+                const bufferLength = micStreamAnalyser.frequencyBinCount;
+                const dataArray = new Uint8Array(bufferLength);
+
+                function draw() {
+                    if (!micStreamActive || !micStreamAudioContext) return;
+
+                    micStreamAnalyser.getByteFrequencyData(dataArray);
+
+                    ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                    const barWidth = (canvas.width / bufferLength) * 2.5;
+                    let x = 0;
+
+                    for (let i = 0; i < bufferLength; i++) {
+                        const barHeight = (dataArray[i] / 255) * canvas.height;
+                        // Use green hue for receiving audio (to differentiate from sending)
+                        ctx.fillStyle = `hsl(${120 + dataArray[i] / 4}, 100%, 50%)`;
+                        ctx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
+                        x += barWidth + 1;
+                    }
+
+                    micStreamWaveformInterval = requestAnimationFrame(draw);
+                }
+
+                draw();
+                log('info', '🎨 Mic stream waveform started');
+            } catch (err) {
+                log('warn', 'Could not start mic stream waveform: ' + err.message);
+            }
+        }
+
+        // Stop mic stream waveform visualization
+        function stopMicStreamWaveform() {
+            if (micStreamWaveformInterval) {
+                cancelAnimationFrame(micStreamWaveformInterval);
+                micStreamWaveformInterval = null;
+            }
+            if (micStreamAudioContext) {
+                micStreamAudioContext.close().catch(() => { });
+                micStreamAudioContext = null;
+                micStreamAnalyser = null;
+            }
+            // Clear the canvas
+            const canvas = document.getElementById('mic-waveform-canvas');
+            if (canvas) {
+                const ctx = canvas.getContext('2d');
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+            }
+        }
 
         // Toggle voice recording (single button)
         async function toggleVoiceRecord() {
